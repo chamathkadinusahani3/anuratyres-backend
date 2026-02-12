@@ -12,9 +12,5 @@
       "dest": "/server.js",
       "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
     }
-  ],
-  "env": {
-    "MONGODB_URI": "@mongodb_uri",
-    "PORT": "5000"
-  }
+  ]
 }
