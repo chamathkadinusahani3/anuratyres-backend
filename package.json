@@ -4,7 +4,7 @@
   "description": "Booking system backend API",
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
+    "dev": "node --watch api/bookings.js",
     "build": "echo 'Build complete'",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
