@@ -1,5 +1,6 @@
 import { connectToDatabase } from "../lib/mongodb.js";
 import Booking from "../models/Booking.js";
+import { setCorsHeaders, handleOptionsRequest } from "../lib/cors.js";
 
 function generateBookingId() {
   const timestamp = Date.now().toString().slice(-4);
@@ -7,23 +8,15 @@ function generateBookingId() {
   return `BK-${random}${timestamp}`.slice(0, 10);
 }
 
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-}
-
 export default async function handler(req, res) {
   setCorsHeaders(res);
+  
+  if (handleOptionsRequest(req, res)) return;
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  try {
+    await connectToDatabase();
 
-  await connectToDatabase();
-
-  if (req.method === 'GET') {
-    try {
+    if (req.method === 'GET') {
       const { status, search, limit = 50 } = req.query;
       let query = {};
       
@@ -61,18 +54,9 @@ export default async function handler(req, res) {
           fullData: b
         }))
       });
-    } catch (error) {
-      console.error('Error fetching bookings:', error);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to fetch bookings', 
-        error: error.message 
-      });
     }
-  }
 
-  if (req.method === 'POST') {
-    try {
+    if (req.method === 'POST') {
       const bookingId = generateBookingId();
       const booking = new Booking({ 
         bookingId, 
@@ -94,16 +78,16 @@ export default async function handler(req, res) {
           branch: booking.branch
         }
       });
-    } catch (error) {
-      console.error('Error creating booking:', error);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to create booking', 
-        error: error.message 
-      });
     }
-  }
 
-  res.setHeader('Allow', ['GET', 'POST']);
-  return res.status(405).end(`Method ${req.method} Not Allowed`);
+    res.setHeader('Allow', ['GET', 'POST']);
+    return res.status(405).end(`Method ${req.method} Not Allowed`);
+  } catch (error) {
+    console.error('Error:', error);
+    return res.status(500).json({ 
+      success: false, 
+      message: 'Server error', 
+      error: error.message 
+    });
+  }
 }

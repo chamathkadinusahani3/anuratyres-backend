@@ -1,26 +1,18 @@
 import { connectToDatabase } from "../../lib/mongodb.js";
 import Booking from "../../models/Booking.js";
-
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-}
+import { setCorsHeaders, handleOptionsRequest } from "../../lib/cors.js";
 
 export default async function handler(req, res) {
   const { id } = req.query;
-  const { method } = req;
 
   setCorsHeaders(res);
-
-  if (method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-
-  await connectToDatabase();
+  
+  if (handleOptionsRequest(req, res)) return;
 
   try {
-    if (method === 'GET') {
+    await connectToDatabase();
+
+    if (req.method === 'GET') {
       const booking = await Booking.findOne({ bookingId: id });
       if (!booking) {
         return res.status(404).json({ 
@@ -31,7 +23,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, booking });
     }
 
-    if (method === 'PATCH') {
+    if (req.method === 'PATCH') {
       const { status } = req.body;
       
       if (status && !['Pending', 'In Progress', 'Completed', 'Cancelled'].includes(status)) {
@@ -60,7 +52,7 @@ export default async function handler(req, res) {
       });
     }
 
-    if (method === 'DELETE') {
+    if (req.method === 'DELETE') {
       const booking = await Booking.findOneAndDelete({ bookingId: id });
       if (!booking) {
         return res.status(404).json({ 
@@ -75,7 +67,7 @@ export default async function handler(req, res) {
     }
 
     res.setHeader('Allow', ['GET', 'PATCH', 'DELETE']);
-    return res.status(405).end(`Method ${method} Not Allowed`);
+    return res.status(405).end(`Method ${req.method} Not Allowed`);
   } catch (error) {
     console.error('Error:', error);
     return res.status(500).json({ 

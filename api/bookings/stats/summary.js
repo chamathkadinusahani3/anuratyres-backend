@@ -1,18 +1,11 @@
 import { connectToDatabase } from "../../../lib/mongodb.js";
 import Booking from "../../../models/Booking.js";
-
-function setCorsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-}
+import { setCorsHeaders, handleOptionsRequest } from "../../../lib/cors.js";
 
 export default async function handler(req, res) {
   setCorsHeaders(res);
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  
+  if (handleOptionsRequest(req, res)) return;
 
   if (req.method !== 'GET') {
     res.setHeader('Allow', ['GET']);
