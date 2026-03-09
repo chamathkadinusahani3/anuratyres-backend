@@ -7,6 +7,13 @@ const bookingSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  // ── NEW: links MongoDB booking to Firebase user ──────────────────────────
+  firebaseUid: {
+    type: String,
+    default: null,   // null = guest booking (not logged in)
+    index: true
+  },
+  // ────────────────────────────────────────────────────────────────────────
   branch: {
     id: String,
     name: String,
