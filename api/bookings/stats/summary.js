@@ -3,8 +3,8 @@ import Booking from "../../../models/Booking.js";
 import { setCorsHeaders, handleOptionsRequest } from "../../../lib/cors.js";
 
 export default async function handler(req, res) {
-  setCorsHeaders(res);
-  
+  setCorsHeaders(req, res); // ✅ Fixed: req AND res
+
   if (handleOptionsRequest(req, res)) return;
 
   if (req.method !== 'GET') {
@@ -29,10 +29,10 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     console.error('Error fetching stats:', error);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'Failed to fetch statistics', 
-      error: error.message 
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch statistics',
+      error: error.message
     });
   }
 }

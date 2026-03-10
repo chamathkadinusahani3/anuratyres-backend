@@ -4,22 +4,26 @@ import { setCorsHeaders, handleOptionsRequest } from "../../lib/cors.js";
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
-// ── Firebase Admin init (runs once, safe across hot reloads) ────────────────
-if (!getApps().length) {
-  initializeApp({
-    credential: cert({
-      projectId:    process.env.FIREBASE_PROJECT_ID,
-      clientEmail:  process.env.FIREBASE_CLIENT_EMAIL,
-      // Replace \n escape in env var with real newlines
-      privateKey:   process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-    }),
-  });
+// ── Firebase Admin init (safe — won't crash if env vars missing) ─────────────
+let adminDb = null;
+
+try {
+  if (!getApps().length) {
+    initializeApp({
+      credential: cert({
+        projectId:   process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+      }),
+    });
+  }
+  adminDb = getFirestore();
+  console.log('✅ Firebase Admin initialized');
+} catch (err) {
+  console.error('❌ Firebase Admin init failed:', err.message);
 }
 
-const adminDb = getFirestore();
-
-// ── Status mapping: MongoDB → Firestore ─────────────────────────────────────
-// MongoDB uses Title Case, Firestore uses lowercase to match DashboardPage
+// ── Status mapping: MongoDB → Firestore ──────────────────────────────────────
 const STATUS_MAP = {
   'Pending':     'upcoming',
   'In Progress': 'upcoming',
@@ -30,7 +34,7 @@ const STATUS_MAP = {
 export default async function handler(req, res) {
   const { id } = req.query;
 
-  setCorsHeaders(res);
+  setCorsHeaders(req, res); // ✅ correct
 
   if (handleOptionsRequest(req, res)) return;
 
@@ -40,43 +44,36 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const booking = await Booking.findOne({ bookingId: id });
       if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking not found'
-        });
+        return res.status(404).json({ success: false, message: 'Booking not found' });
       }
       return res.status(200).json({ success: true, booking });
     }
 
     if (req.method === 'PATCH') {
-      const { status } = req.body;
+      const { status, firebaseUid } = req.body;
 
       if (status && !['Pending', 'In Progress', 'Completed', 'Cancelled'].includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Invalid status'
-        });
+        return res.status(400).json({ success: false, message: 'Invalid status' });
       }
 
-      // 1️⃣ Update MongoDB as before
+      const updateData = { updatedAt: new Date() };
+      if (status)      updateData.status      = status;
+      if (firebaseUid) updateData.firebaseUid = firebaseUid;
+
       const booking = await Booking.findOneAndUpdate(
         { bookingId: id },
-        { status, updatedAt: new Date() },
+        updateData,
         { new: true }
       );
 
       if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking not found'
-        });
+        return res.status(404).json({ success: false, message: 'Booking not found' });
       }
 
-      // 2️⃣ Sync to Firestore if this booking belongs to a logged-in user
-      if (booking.firebaseUid) {
+      // ── Sync to Firestore when status changes ────────────────────────────
+      if (status && booking.firebaseUid && adminDb) {
         try {
           const firestoreStatus = STATUS_MAP[status] ?? 'upcoming';
-
           await adminDb
             .collection('users')
             .doc(booking.firebaseUid)
@@ -86,36 +83,25 @@ export default async function handler(req, res) {
               status: firestoreStatus,
               updatedAt: new Date().toISOString(),
             });
-
           console.log(`✅ Firestore synced: ${booking.bookingId} → ${firestoreStatus}`);
         } catch (firestoreErr) {
-          // Don't fail the whole request if Firestore sync fails
-          // MongoDB is already updated — log and continue
-          console.error('⚠️ Firestore sync failed (non-critical):', firestoreErr.message);
+          console.error('⚠️ Firestore sync failed:', firestoreErr.message);
         }
-      } else {
-        console.log(`ℹ️ No firebaseUid for booking ${booking.bookingId} — skipping Firestore sync`);
+      } else if (status && !booking.firebaseUid) {
+        console.log(`ℹ️ No firebaseUid for ${booking.bookingId} — skipping Firestore sync`);
+      } else if (status && !adminDb) {
+        console.warn('⚠️ adminDb not initialized — check FIREBASE_* env vars in Vercel');
       }
 
-      return res.status(200).json({
-        success: true,
-        message: 'Booking status updated',
-        booking
-      });
+      return res.status(200).json({ success: true, message: 'Booking updated', booking });
     }
 
     if (req.method === 'DELETE') {
       const booking = await Booking.findOneAndDelete({ bookingId: id });
       if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking not found'
-        });
+        return res.status(404).json({ success: false, message: 'Booking not found' });
       }
-      return res.status(200).json({
-        success: true,
-        message: 'Booking deleted successfully'
-      });
+      return res.status(200).json({ success: true, message: 'Booking deleted successfully' });
     }
 
     res.setHeader('Allow', ['GET', 'PATCH', 'DELETE']);
@@ -123,10 +109,6 @@ export default async function handler(req, res) {
 
   } catch (error) {
     console.error('Error:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error',
-      error: error.message
-    });
+    return res.status(500).json({ success: false, message: 'Server error', error: error.message });
   }
 }

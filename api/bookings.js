@@ -9,8 +9,8 @@ function generateBookingId() {
 }
 
 export default async function handler(req, res) {
-  setCorsHeaders(res);
-  
+  setCorsHeaders(req, res); // ✅ Fixed: req AND res
+
   if (handleOptionsRequest(req, res)) return;
 
   try {
@@ -19,11 +19,11 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       const { status, search, limit = 50 } = req.query;
       let query = {};
-      
+
       if (status && status !== 'all') {
         query.status = status;
       }
-      
+
       if (search) {
         query.$or = [
           { bookingId: { $regex: search, $options: 'i' } },
@@ -58,10 +58,10 @@ export default async function handler(req, res) {
 
     if (req.method === 'POST') {
       const bookingId = generateBookingId();
-      const booking = new Booking({ 
-        bookingId, 
-        ...req.body, 
-        status: 'Pending' 
+      const booking = new Booking({
+        bookingId,
+        ...req.body,
+        status: 'Pending'
       });
       await booking.save();
 
@@ -84,10 +84,10 @@ export default async function handler(req, res) {
     return res.status(405).end(`Method ${req.method} Not Allowed`);
   } catch (error) {
     console.error('Error:', error);
-    return res.status(500).json({ 
-      success: false, 
-      message: 'Server error', 
-      error: error.message 
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
     });
   }
 }
