@@ -8,8 +8,49 @@
   ],
   "routes": [
     {
-      "src": "/api/(.*)",
-      "dest": "/api/$1"
+      "src": "/(.*)",
+      "headers": {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PATCH, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization"
+      },
+      "continue": true
+    },
+    {
+      "src": "/api/bookings/stats/summary",
+      "dest": "/api/bookings/stats/summary.js"
+    },
+    {
+      "src": "/api/bookings/([^/]+)",
+      "dest": "/api/bookings/[id].js"
+    },
+    {
+      "src": "/api/bookings",
+      "dest": "/api/bookings.js"
+    },
+    {
+      "src": "/api/corporate/companies",
+      "dest": "/api/corporate/companies.js"
+    },
+    {
+      "src": "/api/corporate/complete",
+      "dest": "/api/corporate/complete.js"
+    },
+    {
+      "src": "/api/corporate/employees",
+      "dest": "/api/corporate/employees.js"
+    },
+    {
+      "src": "/api/corporate/stats",
+      "dest": "/api/corporate/stats.js"
+    },
+    {
+      "src": "/api/health",
+      "dest": "/api/health.js"
+    },
+    {
+      "src": "/api/test",
+      "dest": "/api/test.js"
     }
   ]
 }
