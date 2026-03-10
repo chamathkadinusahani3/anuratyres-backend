@@ -9,7 +9,7 @@ function generateBookingId() {
 }
 
 export default async function handler(req, res) {
-  setCorsHeaders(req, res); // ✅ Fixed: req AND res
+  setCorsHeaders(req, res);
 
   if (handleOptionsRequest(req, res)) return;
 
@@ -17,7 +17,7 @@ export default async function handler(req, res) {
     await connectToDatabase();
 
     if (req.method === 'GET') {
-      const { status, search, limit = 50 } = req.query;
+      const { status, search, date, limit = 50 } = req.query;
       let query = {};
 
       if (status && status !== 'all') {
@@ -32,6 +32,14 @@ export default async function handler(req, res) {
         ];
       }
 
+      // ✅ Date filter support
+      if (date) {
+        const start = new Date(date);
+        const end = new Date(date);
+        end.setDate(end.getDate() + 1);
+        query.date = { $gte: start, $lt: end };
+      }
+
       const bookings = await Booking.find(query)
         .sort({ createdAt: -1 })
         .limit(parseInt(limit));
@@ -40,18 +48,17 @@ export default async function handler(req, res) {
         success: true,
         count: bookings.length,
         bookings: bookings.map(b => ({
-          id: b.bookingId,
-          date: b.date.toISOString().split('T')[0],
-          customer: b.customer.name,
-          vehicle: b.customer.vehicleNo || 'N/A',
-          service: b.services.map(s => s.name).join(', '),
+          id: b.bookingId,          // ✅ always the BK-XXXX string, no fullData
+          date: b.date ? b.date.toISOString().split('T')[0] : '',
+          customer: b.customer?.name || '',
+          vehicle: b.customer?.vehicleNo || 'N/A',
+          service: b.services?.map(s => s.name).join(', ') || '',
           status: b.status,
           amount: b.amount,
-          email: b.customer.email,
-          phone: b.customer.phone,
-          branch: b.branch.name,
-          timeSlot: b.timeSlot,
-          fullData: b
+          email: b.customer?.email || '',
+          phone: b.customer?.phone || '',
+          branch: b.branch?.name || '',
+          timeSlot: b.timeSlot || '',
         }))
       });
     }
@@ -82,6 +89,7 @@ export default async function handler(req, res) {
 
     res.setHeader('Allow', ['GET', 'POST']);
     return res.status(405).end(`Method ${req.method} Not Allowed`);
+
   } catch (error) {
     console.error('Error:', error);
     return res.status(500).json({

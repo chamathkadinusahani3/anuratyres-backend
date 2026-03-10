@@ -27,6 +27,7 @@ try {
 const STATUS_MAP = {
   'Pending':     'upcoming',
   'In Progress': 'upcoming',
+  'Waiting':     'upcoming',
   'Completed':   'completed',
   'Cancelled':   'cancelled',
 };
@@ -52,7 +53,7 @@ export default async function handler(req, res) {
     if (req.method === 'PATCH') {
       const { status, firebaseUid } = req.body;
 
-      if (status && !['Pending', 'In Progress', 'Completed', 'Cancelled'].includes(status)) {
+      if (status && !['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'].includes(status)) {
         return res.status(400).json({ success: false, message: 'Invalid status' });
       }
 
