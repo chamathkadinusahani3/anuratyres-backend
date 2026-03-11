@@ -4,7 +4,7 @@ import { setCorsHeaders, handleOptionsRequest } from "../../lib/cors.js";
 import { initializeApp, getApps, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
-// ── Firebase Admin init (safe — won't crash if env vars missing) ─────────────
+// ── Firebase Admin init ───────────────────────────────────────────────────────
 let adminDb = null;
 
 try {
@@ -33,28 +33,42 @@ const STATUS_MAP = {
 };
 
 export default async function handler(req, res) {
-  const { id } = req.query;
-
-  setCorsHeaders(req, res); // ✅ correct
-
+  setCorsHeaders(req, res);
   if (handleOptionsRequest(req, res)) return;
+
+  // ✅ FIX: Vercel passes dynamic segment as req.query.id
+  // But also handle the case where it comes from the URL path directly
+  const id = req.query.id || req.url?.split('/').pop()?.split('?')[0];
+
+  console.log(`[${req.method}] /api/bookings/${id}`);
+
+  if (!id) {
+    return res.status(400).json({ success: false, message: 'Booking ID is required' });
+  }
 
   try {
     await connectToDatabase();
 
+    // ── GET ────────────────────────────────────────────────────────────────────
     if (req.method === 'GET') {
       const booking = await Booking.findOne({ bookingId: id });
       if (!booking) {
+        console.log(`[GET] Booking not found: ${id}`);
         return res.status(404).json({ success: false, message: 'Booking not found' });
       }
       return res.status(200).json({ success: true, booking });
     }
 
+    // ── PATCH ──────────────────────────────────────────────────────────────────
     if (req.method === 'PATCH') {
-      const { status, firebaseUid } = req.body;
+      const { status, firebaseUid } = req.body || {};
 
-      if (status && !['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'].includes(status)) {
-        return res.status(400).json({ success: false, message: 'Invalid status' });
+      console.log(`[PATCH] id=${id} status=${status} firebaseUid=${firebaseUid}`);
+
+      // Validate status if provided
+      const VALID_STATUSES = ['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'];
+      if (status && !VALID_STATUSES.includes(status)) {
+        return res.status(400).json({ success: false, message: `Invalid status: ${status}` });
       }
 
       const updateData = { updatedAt: new Date() };
@@ -63,15 +77,25 @@ export default async function handler(req, res) {
 
       const booking = await Booking.findOneAndUpdate(
         { bookingId: id },
-        updateData,
+        { $set: updateData },
         { new: true }
       );
 
       if (!booking) {
-        return res.status(404).json({ success: false, message: 'Booking not found' });
+        console.log(`[PATCH] Booking not found in MongoDB: ${id}`);
+        // ✅ Debug: List a few bookings so we can see what IDs actually exist
+        const sample = await Booking.find({}).limit(5).select('bookingId status');
+        console.log('[PATCH] Sample bookings in DB:', sample.map(b => b.bookingId));
+        return res.status(404).json({
+          success: false,
+          message: `Booking not found: ${id}`,
+          debug_sample: sample.map(b => b.bookingId), // remove in production
+        });
       }
 
-      // ── Sync to Firestore when status changes ────────────────────────────
+      console.log(`[PATCH] Updated booking: ${booking.bookingId} → ${booking.status}`);
+
+      // ── Sync to Firestore when status changes ────────────────────────────────
       if (status && booking.firebaseUid && adminDb) {
         try {
           const firestoreStatus = STATUS_MAP[status] ?? 'upcoming';
@@ -86,6 +110,7 @@ export default async function handler(req, res) {
             });
           console.log(`✅ Firestore synced: ${booking.bookingId} → ${firestoreStatus}`);
         } catch (firestoreErr) {
+          // Don't fail the whole request if Firestore sync fails
           console.error('⚠️ Firestore sync failed:', firestoreErr.message);
         }
       } else if (status && !booking.firebaseUid) {
@@ -97,6 +122,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, message: 'Booking updated', booking });
     }
 
+    // ── DELETE ─────────────────────────────────────────────────────────────────
     if (req.method === 'DELETE') {
       const booking = await Booking.findOneAndDelete({ bookingId: id });
       if (!booking) {
@@ -109,7 +135,11 @@ export default async function handler(req, res) {
     return res.status(405).end(`Method ${req.method} Not Allowed`);
 
   } catch (error) {
-    console.error('Error:', error);
-    return res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    console.error('[id].js error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message,
+    });
   }
 }
