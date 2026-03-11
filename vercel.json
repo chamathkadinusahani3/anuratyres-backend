@@ -13,19 +13,13 @@
       },
       "continue": true
     },
-    { "src": "/api/bookings/stats/summary",   "dest": "/api/bookings/stats/summary.js" },
-    { "src": "/api/bookings/availability",    "dest": "/api/bookings/availability.js" },
-    { "src": "/api/bookings/([^/]+)/status",  "dest": "/api/bookings/[id].js" },
-    { "src": "/api/bookings/([^/]+)",         "dest": "/api/bookings/[id].js" },
-    { "src": "/api/bookings",                 "dest": "/api/bookings.js" },
-    { "src": "/api/corporate/register-employee", "dest": "/api/corporate/register-employee.js" },
-    { "src": "/api/corporate/register",          "dest": "/api/corporate/register.js" },
-    { "src": "/api/corporate/validate",          "dest": "/api/corporate/validate.js" },
-    { "src": "/api/corporate/companies",         "dest": "/api/corporate/companies.js" },
-    { "src": "/api/corporate/complete",          "dest": "/api/corporate/complete.js" },
-    { "src": "/api/corporate/employees",         "dest": "/api/corporate/employees.js" },
-    { "src": "/api/corporate/stats",             "dest": "/api/corporate/stats.js" },
-    { "src": "/api/health", "dest": "/api/health.js" },
-    { "src": "/api/test",   "dest": "/api/test.js" }
+    { "src": "/api/bookings/stats/summary",  "dest": "/api/bookings/stats/summary.js" },
+    { "src": "/api/bookings/availability",   "dest": "/api/bookings/availability.js" },
+    { "src": "/api/bookings/([^/]+)/status", "dest": "/api/bookings/[id].js" },
+    { "src": "/api/bookings/([^/]+)",        "dest": "/api/bookings/[id].js" },
+    { "src": "/api/bookings",                "dest": "/api/bookings.js" },
+    { "src": "/api/corporate/(.*)",          "dest": "/api/corporate.js" },
+    { "src": "/api/corporate",               "dest": "/api/corporate.js" },
+    { "src": "/api/health",                  "dest": "/api/health.js" }
   ]
 }
