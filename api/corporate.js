@@ -1,14 +1,7 @@
 // api/corporate.js
-// Single handler for ALL corporate routes — replaces 6 separate files:
-//   GET  /api/corporate/companies
-//   GET  /api/corporate/complete
-//   GET  /api/corporate/employees
-//   GET  /api/corporate/stats
-//   GET  /api/corporate/validate
-//   POST /api/corporate/register
-//   POST /api/corporate/register-employee
-//   PATCH /api/corporate/company-status
-//   PATCH /api/corporate/employee-status
+// Single handler for ALL corporate routes
+// Vercel passes req.url as the FULL path e.g. "/api/corporate/complete?foo=bar"
+// or sometimes just "/complete" depending on routing — we handle both.
 
 import { MongoClient, ObjectId } from 'mongodb';
 
@@ -21,26 +14,37 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
 }
 
+// Reuse MongoDB connection across warm invocations
 let cachedClient = null;
 async function getDb() {
-  if (!cachedClient) {
+  if (!cachedClient || !cachedClient.topology?.isConnected()) {
     cachedClient = new MongoClient(uri);
     await cachedClient.connect();
   }
   return cachedClient.db('anura_tyres');
 }
 
+/**
+ * Extract the action segment from the URL.
+ * Handles all these cases Vercel might give us:
+ *   /api/corporate/complete        → "complete"
+ *   /api/corporate/complete?x=1   → "complete"
+ *   /complete                      → "complete"
+ *   /corporate/complete            → "complete"
+ */
+function getAction(req) {
+  const raw    = req.url || '';
+  const path   = raw.split('?')[0];           // strip query string
+  const parts  = path.split('/').filter(Boolean); // split and remove empty
+  return parts[parts.length - 1] || '';       // always the last non-empty segment
+}
+
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
-  // Parse the sub-route from the URL
-  // e.g. /api/corporate/register  → action = "register"
-  //      /api/corporate/companies → action = "companies"
-  const url    = req.url || '';
-  const parts  = url.replace(/\?.*$/, '').split('/').filter(Boolean);
-  // parts = ["api", "corporate", "register"] or ["api", "corporate", "validate"]
-  const action = parts[parts.length - 1]; // last segment
+  const action = getAction(req);
+  console.log(`[corporate] method=${req.method} url=${req.url} action=${action}`);
 
   try {
     const db = await getDb();
@@ -54,9 +58,10 @@ export default async function handler(req, res) {
 
     // ── GET /api/corporate/complete ──────────────────────────────────────────
     if (req.method === 'GET' && action === 'complete') {
-      const companies = await db.collection('corporate_companies')
-        .find({}).sort({ registeredDate: -1 }).toArray();
-      const employees = await db.collection('employees').find({}).toArray();
+      const [companies, employees] = await Promise.all([
+        db.collection('corporate_companies').find({}).sort({ registeredDate: -1 }).toArray(),
+        db.collection('employees').find({}).toArray(),
+      ]);
       const companiesWithEmployees = companies.map(c => ({
         ...c,
         employees:     employees.filter(e => e.corporateCode === c.corporateCode),
@@ -76,14 +81,16 @@ export default async function handler(req, res) {
 
     // ── GET /api/corporate/stats ─────────────────────────────────────────────
     if (req.method === 'GET' && action === 'stats') {
-      const companies = await db.collection('corporate_companies').find({}).toArray();
-      const employees = await db.collection('employees').find({}).toArray();
+      const [companies, employees] = await Promise.all([
+        db.collection('corporate_companies').find({}).toArray(),
+        db.collection('employees').find({}).toArray(),
+      ]);
       const stats = {
-        totalCompanies:    companies.length,
-        activeCompanies:   companies.filter(c => c.status === 'active').length,
-        totalEmployees:    employees.length,
-        activeEmployees:   employees.filter(e => e.status === 'active').length,
-        totalBookings:     companies.reduce((s, c) => s + (c.bookingCount || 0), 0),
+        totalCompanies:     companies.length,
+        activeCompanies:    companies.filter(c => c.status === 'active').length,
+        totalEmployees:     employees.length,
+        activeEmployees:    employees.filter(e => e.status === 'active').length,
+        totalBookings:      companies.reduce((s, c) => s + (c.bookingCount || 0), 0),
         totalDiscountGiven: 0,
         topCompanies: companies
           .map(c => ({
@@ -105,7 +112,6 @@ export default async function handler(req, res) {
       const company = await db.collection('corporate_companies').findOne({
         corporateCode: code.trim().toUpperCase(),
       });
-
       if (!company) {
         return res.status(200).json({ success: true, valid: false, message: 'Invalid corporate code' });
       }
@@ -148,9 +154,8 @@ export default async function handler(req, res) {
         corporateCode, discount: 10, status: 'active',
         registeredDate: new Date().toISOString(), bookingCount: 0, createdAt: new Date(),
       });
-
       console.log(`✅ Corporate registered: ${companyName} → ${corporateCode}`);
-      return res.status(201).json({ success: true, message: 'Corporate registration successful', corporateCode });
+      return res.status(201).json({ success: true, message: 'Registration successful', corporateCode });
     }
 
     // ── POST /api/corporate/register-employee ────────────────────────────────
@@ -176,7 +181,7 @@ export default async function handler(req, res) {
       if (existingEmp) {
         return res.status(409).json({
           success: false,
-          message: 'You are already registered for this company\'s discount program.',
+          message: "You are already registered for this company's discount program.",
           employeeDiscountId: existingEmp.employeeDiscountId,
         });
       }
@@ -190,10 +195,9 @@ export default async function handler(req, res) {
         employeeDiscountId, discount: 10, status: 'active',
         registeredDate: new Date().toISOString(), usageCount: 0, createdAt: new Date(),
       });
-
-      console.log(`✅ Employee registered: ${employeeName} → ${employeeDiscountId} (${company.companyName})`);
+      console.log(`✅ Employee registered: ${employeeName} → ${employeeDiscountId}`);
       return res.status(201).json({
-        success: true, message: 'Employee registration successful',
+        success: true, message: 'Registration successful',
         employeeDiscountId, companyName: company.companyName,
       });
     }
@@ -202,10 +206,8 @@ export default async function handler(req, res) {
     if (req.method === 'PATCH' && action === 'company-status') {
       const { id, status } = req.body;
       if (!id || !status) return res.status(400).json({ success: false, message: 'id and status required' });
-
       await db.collection('corporate_companies').updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { status } }
+        { _id: new ObjectId(id) }, { $set: { status } }
       );
       return res.status(200).json({ success: true });
     }
@@ -214,19 +216,26 @@ export default async function handler(req, res) {
     if (req.method === 'PATCH' && action === 'employee-status') {
       const { id, status } = req.body;
       if (!id || !status) return res.status(400).json({ success: false, message: 'id and status required' });
-
       await db.collection('employees').updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { status } }
+        { _id: new ObjectId(id) }, { $set: { status } }
       );
       return res.status(200).json({ success: true });
     }
 
-    // ── 404 fallback ──────────────────────────────────────────────────────────
-    return res.status(404).json({ success: false, message: `Unknown corporate action: ${action}` });
+    // ── 404 ───────────────────────────────────────────────────────────────────
+    console.warn(`[corporate] No handler matched: method=${req.method} action=${action} url=${req.url}`);
+    return res.status(404).json({
+      success: false,
+      message: `Unknown corporate action: "${action}"`,
+      debug: { method: req.method, url: req.url, action },
+    });
 
   } catch (error) {
     console.error(`[corporate/${action}] error:`, error);
-    return res.status(500).json({ success: false, message: 'Server error', error: error.message });
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message,
+    });
   }
 }
