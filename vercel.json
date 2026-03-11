@@ -21,6 +21,10 @@
       "dest": "/api/bookings/stats/summary.js"
     },
     {
+      "src": "/api/bookings/availability",
+      "dest": "/api/bookings/availability.js"
+    },
+    {
       "src": "/api/bookings/([^/]+)/status",
       "dest": "/api/bookings/[id].js"
     },
