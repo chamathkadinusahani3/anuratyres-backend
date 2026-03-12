@@ -16,7 +16,7 @@ async function getDb() {
     cachedClient = new MongoClient(uri);
     await cachedClient.connect();
   }
-  return cachedClient.db('anura_tyres');
+  return cachedClient.db('anura-tyres');
 }
 
 function getAction(req) {
