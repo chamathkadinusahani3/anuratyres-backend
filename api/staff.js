@@ -156,6 +156,8 @@ module.exports = async function handler(req, res) {
       } else if (a === 'assign_bay') {
         await dayCol.updateOne(filter, { $set: { bayNumber: bayNumber ?? null } }, opts);
       } else if (a === 'set_status' && status) {
+        const validStatuses = ['active', 'on_break', 'off', 'Available', 'Busy', 'On Break', 'On Leave'];
+        if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Invalid status value' });
         await dayCol.updateOne(filter, { $set: { status } }, opts);
       } else {
         return res.status(400).json({ error: 'Unknown action' });
