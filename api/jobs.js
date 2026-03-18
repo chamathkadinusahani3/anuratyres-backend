@@ -11,7 +11,6 @@
 //   GET    ?resource=report&branch=X&date=Y      → end-of-day productivity report
 
 const { MongoClient, ObjectId } = require('mongodb');
-const { setCorsHeaders } = require('./cors');
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
@@ -124,7 +123,9 @@ async function syncBookingsToJobs(db, branch, dateStr) {
 
 // ─── Main handler ─────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
-  setCorsHeaders(req, res);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
