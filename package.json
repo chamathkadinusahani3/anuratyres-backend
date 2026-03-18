@@ -2,7 +2,6 @@
   "name": "backend",
   "version": "1.0.0",
   "description": "Booking system backend API",
-  "type": "module",
   "main": "api/bookings.js",
   "scripts": {
     "start": "node api/bookings.js",
@@ -14,9 +13,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
     "dotenv": "^17.2.4",
     "firebase-admin": "^13.7.0",
+    "jsonwebtoken": "^9.0.3",
     "mongodb": "^7.1.0",
     "mongoose": "^9.1.6"
   },
