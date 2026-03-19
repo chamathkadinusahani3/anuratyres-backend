@@ -84,29 +84,31 @@ async function syncBookingsToJobs(db, branch, dateStr) {
   dayStart.setMinutes(dayStart.getMinutes() - 330); // 18:30 prev day UTC
   const dayEnd = new Date(`${dateStr}T23:59:59.999Z`);
 
-  // ── Try both 'bookings' collection names Mongoose may use ─────────────────
+  // ── Branch name mapping ──────────────────────────────────────────────────
+  // Website stores full name e.g. "Anura Tyres (Pvt) Ltd Pannipitiya"
+  // Job board uses short name e.g. "Pannipitiya"
+  // Match if branch field contains the short name (case-insensitive)
+  const branchRegex = new RegExp(branch, 'i');
+
   let bookings = [];
   for (const colName of ['bookings', 'Booking', 'booking']) {
     try {
+      const any = await db.collection(colName).findOne({});
+      if (!any) continue; // collection empty or doesn't exist
+
       const results = await db.collection(colName).find({
         $or: [
-          { 'branch.name': branch },  // website bookings
-          { branch: branch },          // manual bookings (branch stored as string)
+          { 'branch.name': { $regex: branchRegex } }, // website: { name: "Anura Tyres...Pannipitiya" }
+          { 'branch.name': branch },                   // exact match
+          { branch: { $regex: branchRegex } },         // plain string branch
+          { branch: branch },                           // exact plain string
         ],
         date: { $gte: dayStart, $lte: dayEnd },
         status: { $nin: ['Cancelled', 'Completed', 'cancelled', 'completed'] },
       }).toArray();
-      if (results.length > 0) {
-        bookings = results;
-        break;
-      }
-      // If no results with date filter, try without date to check if collection exists
-      const any = await db.collection(colName).findOne({});
-      if (any) {
-        // Collection exists but no results for this branch/date — that's fine
-        bookings = results;
-        break;
-      }
+
+      bookings = results;
+      break; // found the right collection
     } catch(e) {
       // collection doesn't exist, try next
     }
@@ -136,9 +138,12 @@ async function syncBookingsToJobs(db, branch, dateStr) {
       ? [booking.services]
       : ['General Service'];
 
-    // ── Extract branch name ─────────────────────────────────────────────────
-    const bookingBranch = booking.branch?.name || booking.branch || branch;
-    if (bookingBranch !== branch) continue; // skip wrong branch
+    // ── Extract branch name — match short name inside full name ────────────
+    const bookingBranch = booking.branch?.name || booking.branch || '';
+    const branchMatch = bookingBranch.toLowerCase().includes(branch.toLowerCase())
+                     || branch.toLowerCase().includes(bookingBranch.toLowerCase())
+                     || bookingBranch === branch;
+    if (bookingBranch && !branchMatch) continue; // skip wrong branch
 
     for (const serviceName of services) {
       const exists = await jobsCol.findOne({ bookingId: bookingIdStr, service: serviceName });
