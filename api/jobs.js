@@ -55,10 +55,19 @@ function getAllocatedMins(serviceName) {
 }
 
 // ─── MongoDB connection ───────────────────────────────────────────────────────
+// Extract DB name from URI — same DB that bookings.js uses via Mongoose
+function getDbName(uri) {
+  if (!uri) return 'anura-tyres';
+  // URI format: mongodb+srv://user:pass@cluster/dbname?options
+  const match = uri.match(/\/([^\/\?]+)(\?|$)/);
+  if (match && match[1] && match[1] !== '') return match[1];
+  return 'anura-tyres';
+}
+
 let cachedClient = null;
 async function getDb() {
   if (!cachedClient) cachedClient = await MongoClient.connect(MONGODB_URI);
-  return cachedClient.db('anura-tyres');
+  return cachedClient.db(getDbName(MONGODB_URI));
 }
 
 // ─── Pull today's bookings → job_assignments ──────────────────────────────────
@@ -67,54 +76,93 @@ async function getDb() {
 async function syncBookingsToJobs(db, branch, dateStr) {
   const jobsCol = db.collection('job_assignments');
 
-  // Build date range for the full day (bookings store date as Date object)
+  // ── Wide date range: covers any timezone offset ───────────────────────────
+  // Bookings saved via Mongoose may store date as midnight local OR midnight UTC
+  // so we query a full 48-hour window centred on the date to be safe
   const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
-  const dayEnd   = new Date(`${dateStr}T23:59:59.999Z`);
+  dayStart.setDate(dayStart.getDate() - 1); // 1 day before
+  const dayEnd = new Date(`${dateStr}T23:59:59.999Z`);
+  dayEnd.setDate(dayEnd.getDate() + 1);     // 1 day after
 
-  // Query bookings for this branch and date
-  // Exclude Cancelled and Completed — only actionable ones
-  const bookings = await db.collection('bookings').find({
-    'branch.name': branch,
-    date: { $gte: dayStart, $lte: dayEnd },
-    status: { $nin: ['Cancelled', 'Completed'] },
-  }).toArray();
+  // ── Try both 'bookings' collection names Mongoose may use ─────────────────
+  let bookings = [];
+  for (const colName of ['bookings', 'Booking', 'booking']) {
+    try {
+      const results = await db.collection(colName).find({
+        $or: [
+          { 'branch.name': branch },  // website bookings
+          { branch: branch },          // manual bookings (branch stored as string)
+        ],
+        date: { $gte: dayStart, $lte: dayEnd },
+        status: { $nin: ['Cancelled', 'Completed', 'cancelled', 'completed'] },
+      }).toArray();
+      if (results.length > 0) {
+        bookings = results;
+        break;
+      }
+      // If no results with date filter, try without date to check if collection exists
+      const any = await db.collection(colName).findOne({});
+      if (any) {
+        // Collection exists but no results for this branch/date — that's fine
+        bookings = results;
+        break;
+      }
+    } catch(e) {
+      // collection doesn't exist, try next
+    }
+  }
 
   for (const booking of bookings) {
     const bookingIdStr = booking._id.toString();
 
-    // Each service in the booking becomes a separate job card
+    // ── Verify date matches (handle timezone) ───────────────────────────────
+    const bookingDateStr = booking.date
+      ? (booking.date instanceof Date
+          ? booking.date.toISOString().split('T')[0]
+          : new Date(booking.date).toISOString().split('T')[0])
+      : null;
+    // Accept if date matches OR is within 1 day (timezone tolerance)
+    if (bookingDateStr) {
+      const bDate = new Date(bookingDateStr);
+      const tDate = new Date(dateStr);
+      const diffDays = Math.abs((bDate - tDate) / 86400000);
+      if (diffDays > 1) continue; // skip if more than 1 day off
+    }
+
+    // ── Extract services ────────────────────────────────────────────────────
     const services = Array.isArray(booking.services)
       ? booking.services.map(s => (typeof s === 'string' ? s : s.name)).filter(Boolean)
-      : [booking.services || 'General Service'];
+      : typeof booking.services === 'string'
+      ? [booking.services]
+      : ['General Service'];
+
+    // ── Extract branch name ─────────────────────────────────────────────────
+    const bookingBranch = booking.branch?.name || booking.branch || branch;
+    if (bookingBranch !== branch) continue; // skip wrong branch
 
     for (const serviceName of services) {
-      // Only create if not already in job_assignments
-      const exists = await jobsCol.findOne({
-        bookingId: bookingIdStr,
-        service:   serviceName,
-      });
-
+      const exists = await jobsCol.findOne({ bookingId: bookingIdStr, service: serviceName });
       if (!exists) {
         await jobsCol.insertOne({
-          bookingId:    bookingIdStr,
-          bookingRef:   booking.bookingId || '',   // human-readable BK-XXXX
+          bookingId:     bookingIdStr,
+          bookingRef:    booking.bookingId || '',
           branch,
-          date:         dateStr,
-          timeSlot:     booking.timeSlot  || '',
-          vehiclePlate: booking.customer?.vehicleNo || '',
-          customerName: booking.customer?.name      || '',
-          customerPhone:booking.customer?.phone     || '',
-          service:      serviceName,
-          allocatedMins:getAllocatedMins(serviceName),
-          staffId:      null,
-          bayNumber:    null,
-          status:       'unassigned',
-          chainedFromJob: null,
-          chainedToJob:   null,
-          order:          0,
-          source:         'website',             // 'website' or 'manual'
-          createdAt:      new Date(),
-          updatedAt:      new Date(),
+          date:          dateStr,
+          timeSlot:      booking.timeSlot  || '',
+          vehiclePlate:  booking.customer?.vehicleNo || booking.vehiclePlate || '',
+          customerName:  booking.customer?.name      || booking.customerName || '',
+          customerPhone: booking.customer?.phone     || booking.customerPhone|| '',
+          service:       serviceName,
+          allocatedMins: getAllocatedMins(serviceName),
+          staffId:       null,
+          bayNumber:     null,
+          status:        'unassigned',
+          chainedFromJob:null,
+          chainedToJob:  null,
+          order:         0,
+          source:        'website',
+          createdAt:     new Date(),
+          updatedAt:     new Date(),
         });
       }
     }
