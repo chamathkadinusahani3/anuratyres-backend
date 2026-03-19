@@ -76,13 +76,13 @@ async function getDb() {
 async function syncBookingsToJobs(db, branch, dateStr) {
   const jobsCol = db.collection('job_assignments');
 
-  // ── Wide date range: covers any timezone offset ───────────────────────────
-  // Bookings saved via Mongoose may store date as midnight local OR midnight UTC
-  // so we query a full 48-hour window centred on the date to be safe
+  // ── Date range for Sri Lanka (UTC+5:30) ─────────────────────────────────
+  // Bookings saved as noon UTC (T12:00Z) so they always land on the correct day.
+  // Query: midnight to midnight of the selected local date → T00:00Z to next T00:00Z
+  // This safely catches both old midnight-UTC and new noon-UTC bookings.
   const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
-  dayStart.setDate(dayStart.getDate() - 1); // 1 day before
+  dayStart.setMinutes(dayStart.getMinutes() - 330); // 18:30 prev day UTC
   const dayEnd = new Date(`${dateStr}T23:59:59.999Z`);
-  dayEnd.setDate(dayEnd.getDate() + 1);     // 1 day after
 
   // ── Try both 'bookings' collection names Mongoose may use ─────────────────
   let bookings = [];

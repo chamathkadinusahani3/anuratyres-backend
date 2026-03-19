@@ -34,10 +34,13 @@ export default async function handler(req, res) {
 
       // ✅ Date filter support
       if (date) {
-        const start = new Date(date);
-        const end = new Date(date);
-        end.setDate(end.getDate() + 1);
-        query.date = { $gte: start, $lt: end };
+        // Sri Lanka is UTC+5:30 — midnight LK = 18:30 previous day UTC
+        // So search from 18:30 day-before to 18:30 on the date (full local day)
+        const start = new Date(`${date}T00:00:00.000Z`);
+        start.setMinutes(start.getMinutes() - 330); // subtract 5h30m → 18:30 prev day UTC
+        const end = new Date(`${date}T23:59:59.999Z`);
+        end.setMinutes(end.getMinutes() - 330);     // subtract 5h30m → 18:29 same day UTC
+        query.date = { $gte: start, $lte: end };
       }
 
       const bookings = await Booking.find(query)
@@ -49,7 +52,7 @@ export default async function handler(req, res) {
         count: bookings.length,
         bookings: bookings.map(b => ({
           id: b.bookingId,          // ✅ always the BK-XXXX string, no fullData
-          date: b.date ? b.date.toISOString().split('T')[0] : '',
+          date: b.date ? (() => { const d = new Date(b.date); d.setMinutes(d.getMinutes() + 330); return d.toISOString().split('T')[0]; })() : '',
           customer: b.customer?.name || '',
           vehicle: b.customer?.vehicleNo || 'N/A',
           service: b.services?.map(s => s.name).join(', ') || '',
