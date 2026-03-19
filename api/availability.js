@@ -21,7 +21,7 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
-// Capacity per branch (max bookings per time slot)
+// Capacity  per branch (max bookings per time slot)
 const BRANCH_CAPACITY = {
   'Pannipitiya':                       3,
   'Ratnapura':                         2,
