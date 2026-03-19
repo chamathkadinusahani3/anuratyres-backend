@@ -51,7 +51,16 @@ module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const id = req.query.id || req.url?.split('/').pop()?.split('?')[0];
+  // Extract booking ID from URL: /api/bookings/BK-1234 or /api/bookings/BK-1234/status
+  let id = req.query.id;
+  if (!id) {
+    const parts = (req.url || '').split('/').filter(Boolean);
+    // URL: api/bookings/BK-1234 → parts = ['api','bookings','BK-1234']
+    const bkIdx = parts.findIndex(p => p === 'bookings');
+    if (bkIdx !== -1 && parts[bkIdx + 1]) {
+      id = parts[bkIdx + 1];
+    }
+  }
   if (!id) return res.status(400).json({ success: false, message: 'Booking ID is required' });
 
   try {

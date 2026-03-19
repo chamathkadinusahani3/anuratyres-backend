@@ -1,8 +1,9 @@
-// /api/[id].js  — GET/PATCH/DELETE a single booking by bookingId
+// /api/bookings.js
 const { MongoClient, ObjectId } = require('mongodb');
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
+// ─── DB connection ────────────────────────────────────────────────────────────
 let cachedClient = null;
 function getDbName(uri) {
   if (!uri) return 'anura-tyres';
@@ -14,116 +15,128 @@ async function getDb() {
   return cachedClient.db(getDbName(MONGODB_URI));
 }
 
+// ─── CORS headers ─────────────────────────────────────────────────────────────
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
-// ── Firebase Admin (optional — only initialised if env vars present) ──────────
-let adminDb = null;
-try {
-  const { initializeApp, getApps, cert } = require('firebase-admin/app');
-  const { getFirestore }                  = require('firebase-admin/firestore');
-  if (!getApps().length) {
-    initializeApp({
-      credential: cert({
-        projectId:   process.env.FIREBASE_PROJECT_ID,
-        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-      }),
-    });
-  }
-  adminDb = getFirestore();
-} catch (err) {
-  console.warn('Firebase Admin not available:', err.message);
+// ─── Booking ID generator ─────────────────────────────────────────────────────
+function generateBookingId() {
+  const timestamp = Date.now().toString().slice(-4);
+  const random    = Math.floor(Math.random() * 9000) + 1000;
+  return `BK-${random}${timestamp}`.slice(0, 10);
 }
 
-const STATUS_MAP = {
-  'Pending':     'upcoming',
-  'In Progress': 'upcoming',
-  'Waiting':     'upcoming',
-  'Completed':   'completed',
-  'Cancelled':   'cancelled',
-};
-
+// ─── Main handler ─────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
-
-  // Extract booking ID from URL: /api/bookings/BK-1234 or /api/bookings/BK-1234/status
-  let id = req.query.id;
-  if (!id) {
-    const parts = (req.url || '').split('/').filter(Boolean);
-    // URL: api/bookings/BK-1234 → parts = ['api','bookings','BK-1234']
-    const bkIdx = parts.findIndex(p => p === 'bookings');
-    if (bkIdx !== -1 && parts[bkIdx + 1]) {
-      id = parts[bkIdx + 1];
-    }
-  }
-  if (!id) return res.status(400).json({ success: false, message: 'Booking ID is required' });
 
   try {
     const db  = await getDb();
     const col = db.collection('bookings');
 
-    // ── GET ───────────────────────────────────────────────────────────────────
+    // ── GET — list bookings ───────────────────────────────────────────────────
     if (req.method === 'GET') {
-      const booking = await col.findOne({ bookingId: id });
-      if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-      return res.status(200).json({ success: true, booking });
+      const { status, search, date, limit = 50 } = req.query;
+      const query = {};
+
+      if (status && status !== 'all') query.status = status;
+
+      if (search) {
+        query.$or = [
+          { bookingId:       { $regex: search, $options: 'i' } },
+          { 'customer.name': { $regex: search, $options: 'i' } },
+          { 'customer.email':{ $regex: search, $options: 'i' } },
+        ];
+      }
+
+      if (date) {
+        // Sri Lanka UTC+5:30 — search full local day
+        const start = new Date(`${date}T00:00:00.000Z`);
+        start.setMinutes(start.getMinutes() - 330);
+        const end = new Date(`${date}T23:59:59.999Z`);
+        query.date = { $gte: start, $lte: end };
+      }
+
+      const bookings = await col
+        .find(query)
+        .sort({ createdAt: -1 })
+        .limit(parseInt(limit))
+        .toArray();
+
+      return res.status(200).json({
+        success: true,
+        count: bookings.length,
+        bookings: bookings.map(b => ({
+          id:       b.bookingId,
+          date:     b.date
+            ? (() => { const d = new Date(b.date); d.setMinutes(d.getMinutes() + 330); return d.toISOString().split('T')[0]; })()
+            : '',
+          customer: b.customer?.name   || '',
+          vehicle:  b.customer?.vehicleNo || 'N/A',
+          service:  Array.isArray(b.services) ? b.services.map(s => s.name).join(', ') : '',
+          status:   b.status,
+          amount:   b.amount,
+          email:    b.customer?.email  || '',
+          phone:    b.customer?.phone  || '',
+          branch:   b.branch?.name     || '',
+          timeSlot: b.timeSlot         || '',
+        })),
+      });
     }
 
-    // ── PATCH ─────────────────────────────────────────────────────────────────
-    if (req.method === 'PATCH') {
-      const { status, firebaseUid } = req.body || {};
-      const VALID_STATUSES = ['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'];
-      if (status && !VALID_STATUSES.includes(status)) {
-        return res.status(400).json({ success: false, message: `Invalid status: ${status}` });
+    // ── POST — create booking ─────────────────────────────────────────────────
+    if (req.method === 'POST') {
+      const body = req.body;
+      if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
+        return res.status(400).json({ success: false, message: 'Customer name, email and phone are required' });
+      }
+      if (!body.date) {
+        return res.status(400).json({ success: false, message: 'Date is required' });
+      }
+      if (!body.timeSlot) {
+        return res.status(400).json({ success: false, message: 'Time slot is required' });
       }
 
-      const updateData = { updatedAt: new Date() };
-      if (status)      updateData.status      = status;
-      if (firebaseUid) updateData.firebaseUid = firebaseUid;
+      const bookingId = generateBookingId();
+      const doc = {
+        bookingId,
+        firebaseUid: body.firebaseUid || null,
+        branch:      body.branch   || null,
+        category:    body.category || '',
+        services:    Array.isArray(body.services) ? body.services : [],
+        date:        new Date(body.date),
+        timeSlot:    body.timeSlot,
+        customer:    body.customer,
+        status:      'Pending',
+        amount:      body.amount || '0',
+        createdAt:   new Date(),
+        updatedAt:   new Date(),
+      };
 
-      const result = await col.findOneAndUpdate(
-        { bookingId: id },
-        { $set: updateData },
-        { returnDocument: 'after' }
-      );
-      const booking = result?.value || result;
+      await col.insertOne(doc);
+      console.log('📧 Booking Created:', bookingId);
 
-      if (!booking) {
-        return res.status(404).json({ success: false, message: `Booking not found: ${id}` });
-      }
-
-      // Sync to Firestore if available
-      if (status && booking.firebaseUid && adminDb) {
-        try {
-          await adminDb
-            .collection('users').doc(booking.firebaseUid)
-            .collection('appointments').doc(booking.bookingId)
-            .update({ status: STATUS_MAP[status] ?? 'upcoming', updatedAt: new Date().toISOString() });
-        } catch (e) {
-          console.warn('Firestore sync failed:', e.message);
-        }
-      }
-
-      return res.status(200).json({ success: true, message: 'Booking updated', booking });
-    }
-
-    // ── DELETE ──────────────────
-    if (req.method === 'DELETE') {
-      const result = await col.findOneAndDelete({ bookingId: id });
-      const booking = result?.value || result;
-      if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-      return res.status(200).json({ success: true, message: 'Booking deleted successfully' });
+      return res.status(201).json({
+        success:  true,
+        message:  'Booking created successfully',
+        booking: {
+          bookingId,
+          customer:  doc.customer,
+          date:      doc.date,
+          timeSlot:  doc.timeSlot,
+          branch:    doc.branch,
+        },
+      });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });
 
   } catch (err) {
-    console.error('[id].js error:', err);
+    console.error('bookings.js error:', err);
     return res.status(500).json({ success: false, message: 'Server error', error: err.message });
   }
 };
