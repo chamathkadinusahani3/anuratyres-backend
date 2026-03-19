@@ -1,7 +1,7 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/**/*.js", "use": "@vercel/node" }
+    { "src": "api/*.js", "use": "@vercel/node" }
   ],
   "routes": [
     {
@@ -13,20 +13,16 @@
       },
       "continue": true
     },
-
-    { "src": "/api/bookings/stats/summary",  "dest": "/api/bookings/stats/summary.js" },
-    { "src": "/api/bookings/availability",   "dest": "/api/bookings/availability.js" },
-    { "src": "/api/bookings/([^/]+)/status", "dest": "/api/bookings/[id].js" },
-    { "src": "/api/bookings/([^/]+)",        "dest": "/api/bookings/[id].js" },
-    { "src": "/api/bookings",                "dest": "/api/bookings.js" },
-
-    { "src": "/api/corporate/(.*)",          "dest": "/api/corporate.js" },
-    { "src": "/api/corporate",               "dest": "/api/corporate.js" },
-
-    { "src": "/api/customers",               "dest": "/api/customers.js" },
-    { "src": "/api/staff",                   "dest": "/api/staff.js" },
-    { "src": "/api/jobs",                    "dest": "/api/jobs.js" },
-
-    { "src": "/api/health",                  "dest": "/api/health.js" }
+    { "src": "/api/bookings/stats/summary",      "dest": "/api/bookings.js" },
+    { "src": "/api/bookings/availability",       "dest": "/api/availability.js" },
+    { "src": "/api/bookings/([^/]+)/status",     "dest": "/api/[id].js" },
+    { "src": "/api/bookings/([^/]+)",            "dest": "/api/[id].js" },
+    { "src": "/api/bookings",                    "dest": "/api/bookings.js" },
+    { "src": "/api/corporate/(.*)",              "dest": "/api/corporate.js" },
+    { "src": "/api/corporate",                   "dest": "/api/corporate.js" },
+    { "src": "/api/customers",                   "dest": "/api/customers.js" },
+    { "src": "/api/staff",                       "dest": "/api/staff.js" },
+    { "src": "/api/jobs",                        "dest": "/api/jobs.js" },
+    { "src": "/api/health",                      "dest": "/api/health.js" }
   ]
 }
