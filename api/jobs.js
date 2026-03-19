@@ -16,7 +16,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 // ─── Service time allocations (minutes) ──────────────────────────────────────
 const SERVICE_TIMES = {
-  'Wheel Balancing':        1,
+  'Wheel Balancing':        20,
   'Wheel Alignment':        20,
   'Front Tyre Change':      20,
   'Rear Tyre Change':       20,
@@ -181,6 +181,58 @@ module.exports = async function handler(req, res) {
     const jobsCol   = db.collection('job_assignments');
     const timersCol = db.collection('job_timers');
     const { resource, id, branch, date } = req.query;
+
+    // ══════════════════════════════════════════════════════════════════════
+    // DEBUG — GET ?resource=debug&branch=X&date=Y
+    // Shows raw bookings found — remove after fixing
+    // ══════════════════════════════════════════════════════════════════════
+    if (resource === 'debug') {
+      if (req.method !== 'GET') return res.status(405).end();
+      const dbName = getDbName(MONGODB_URI);
+      const cols   = await db.listCollections().toArray();
+      const colNames = cols.map(c => c.name);
+
+      // Try each collection
+      const results = {};
+      for (const col of colNames) {
+        try {
+          const count = await db.collection(col).countDocuments();
+          results[col] = { count };
+          if (col.toLowerCase().includes('book')) {
+            const sample = await db.collection(col).findOne();
+            results[col].sample = sample ? {
+              _id: sample._id,
+              date: sample.date,
+              branch: sample.branch,
+              status: sample.status,
+              services: sample.services,
+              bookingId: sample.bookingId,
+            } : null;
+
+            // Try the actual query
+            const dayStart = new Date(`${date}T00:00:00.000Z`);
+            dayStart.setMinutes(dayStart.getMinutes() - 330);
+            const dayEnd = new Date(`${date}T23:59:59.999Z`);
+            const found = await db.collection(col).find({
+              date: { $gte: dayStart, $lte: dayEnd },
+            }).toArray();
+            results[col].foundForDate = found.length;
+            results[col].dayStart = dayStart;
+            results[col].dayEnd = dayEnd;
+            if (found.length > 0) {
+              results[col].firstFound = {
+                date: found[0].date,
+                branch: found[0].branch,
+                status: found[0].status,
+              };
+            }
+          }
+        } catch(e) {
+          results[col] = { error: e.message };
+        }
+      }
+      return res.status(200).json({ dbName, collections: colNames, details: results });
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // LOBBY — GET ?resource=lobby&branch=X&date=Y
