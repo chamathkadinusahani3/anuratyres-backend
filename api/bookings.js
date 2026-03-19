@@ -112,7 +112,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ success: true, message: 'Booking updated', booking });
     }
 
-    // ── DELETE ────────────────────────────────────────────────────────────────
+    // ── DELETE ──────────────────
     if (req.method === 'DELETE') {
       const result = await col.findOneAndDelete({ bookingId: id });
       const booking = result?.value || result;
