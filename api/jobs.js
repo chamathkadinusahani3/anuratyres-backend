@@ -16,7 +16,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 // ─── Service time allocations (minutes) ──────────────────────────────────────
 const SERVICE_TIMES = {
-  'Wheel Balancing':        20,
+  'Wheel Balancing':        1,
   'Wheel Alignment':        20,
   'Front Tyre Change':      20,
   'Rear Tyre Change':       20,
