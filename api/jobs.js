@@ -146,7 +146,7 @@ module.exports = async function handler(req, res) {
     const timersCol = db.collection('job_timers');
     const { resource, id, branch, date } = req.query;
 
-    // ══════════════════════════════════════════════════════════════════════
+
     // DEBUG — GET ?resource=debug&branch=X&date=Y
     // Shows raw bookings found — remove after fixing
     // ══════════════════════════════════════════════════════════════════════

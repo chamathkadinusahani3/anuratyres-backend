@@ -32,7 +32,7 @@ export default async function handler(req, res) {
         ];
       }
 
-      // ✅ Date filter support
+      //  Date filter support
       if (date) {
         // Sri Lanka is UTC+5:30 — midnight LK = 18:30 previous day UTC
         // So search from 18:30 day-before to 18:30 on the date (full local day)
