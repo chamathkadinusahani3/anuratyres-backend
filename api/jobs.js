@@ -76,87 +76,46 @@ async function getDb() {
 async function syncBookingsToJobs(db, branch, dateStr) {
   const jobsCol = db.collection('job_assignments');
 
-  // ── Date range for Sri Lanka (UTC+5:30) ─────────────────────────────────
-  // Bookings saved as noon UTC (T12:00Z) so they always land on the correct day.
-  // Query: midnight to midnight of the selected local date → T00:00Z to next T00:00Z
-  // This safely catches both old midnight-UTC and new noon-UTC bookings.
+  // Date range — covers UTC+5:30 (Sri Lanka)
+  // New bookings saved at T12:00Z, old ones at T00:00Z, so search wide
   const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
   dayStart.setMinutes(dayStart.getMinutes() - 330); // 18:30 prev day UTC
-  const dayEnd = new Date(`${dateStr}T23:59:59.999Z`);
+  const dayEnd   = new Date(`${dateStr}T23:59:59.999Z`);
 
-  // ── Branch name mapping ──────────────────────────────────────────────────
-  // Website stores full name e.g. "Anura Tyres (Pvt) Ltd Pannipitiya"
+  // Branch matching — website stores full name e.g. "Anura Tyres (Pvt) Ltd Pannipitiya"
   // Job board uses short name e.g. "Pannipitiya"
-  // Match if branch field contains the short name (case-insensitive)
-  const branchRegex = new RegExp(branch, 'i');
+  // Use regex so "Pannipitiya" matches any branch name containing that word
+  const branchRegex = new RegExp(branch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
-  let bookings = [];
-  for (const colName of ['bookings', 'Booking', 'booking']) {
-    try {
-      const any = await db.collection(colName).findOne({});
-      if (!any) continue; // collection empty or doesn't exist
-
-      const results = await db.collection(colName).find({
-        $or: [
-          { 'branch.name': { $regex: branchRegex } }, // website: { name: "Anura Tyres...Pannipitiya" }
-          { 'branch.name': branch },                   // exact match
-          { branch: { $regex: branchRegex } },         // plain string branch
-          { branch: branch },                           // exact plain string
-        ],
-        date: { $gte: dayStart, $lte: dayEnd },
-        status: { $nin: ['Cancelled', 'Completed', 'cancelled', 'completed'] },
-      }).toArray();
-
-      bookings = results;
-      break; // found the right collection
-    } catch(e) {
-      // collection doesn't exist, try next
-    }
-  }
+  const bookings = await db.collection('bookings').find({
+    'branch.name': { $regex: branchRegex },
+    date:   { $gte: dayStart, $lte: dayEnd },
+    status: { $nin: ['Cancelled', 'Completed'] },
+  }).toArray();
 
   for (const booking of bookings) {
     const bookingIdStr = booking._id.toString();
 
-    // ── Verify date matches (handle timezone) ───────────────────────────────
-    const bookingDateStr = booking.date
-      ? (booking.date instanceof Date
-          ? booking.date.toISOString().split('T')[0]
-          : new Date(booking.date).toISOString().split('T')[0])
-      : null;
-    // Accept if date matches OR is within 1 day (timezone tolerance)
-    if (bookingDateStr) {
-      const bDate = new Date(bookingDateStr);
-      const tDate = new Date(dateStr);
-      const diffDays = Math.abs((bDate - tDate) / 86400000);
-      if (diffDays > 1) continue; // skip if more than 1 day off
-    }
-
-    // ── Extract services ────────────────────────────────────────────────────
     const services = Array.isArray(booking.services)
       ? booking.services.map(s => (typeof s === 'string' ? s : s.name)).filter(Boolean)
-      : typeof booking.services === 'string'
-      ? [booking.services]
       : ['General Service'];
 
-    // ── Extract branch name — match short name inside full name ────────────
-    const bookingBranch = booking.branch?.name || booking.branch || '';
-    const branchMatch = bookingBranch.toLowerCase().includes(branch.toLowerCase())
-                     || branch.toLowerCase().includes(bookingBranch.toLowerCase())
-                     || bookingBranch === branch;
-    if (bookingBranch && !branchMatch) continue; // skip wrong branch
-
     for (const serviceName of services) {
-      const exists = await jobsCol.findOne({ bookingId: bookingIdStr, service: serviceName });
+      const exists = await jobsCol.findOne({
+        bookingId: bookingIdStr,
+        service:   serviceName,
+      });
+
       if (!exists) {
         await jobsCol.insertOne({
           bookingId:     bookingIdStr,
           bookingRef:    booking.bookingId || '',
           branch,
           date:          dateStr,
-          timeSlot:      booking.timeSlot  || '',
-          vehiclePlate:  booking.customer?.vehicleNo || booking.vehiclePlate || '',
-          customerName:  booking.customer?.name      || booking.customerName || '',
-          customerPhone: booking.customer?.phone     || booking.customerPhone|| '',
+          timeSlot:      booking.timeSlot          || '',
+          vehiclePlate:  booking.customer?.vehicleNo || '',
+          customerName:  booking.customer?.name      || '',
+          customerPhone: booking.customer?.phone     || '',
           service:       serviceName,
           allocatedMins: getAllocatedMins(serviceName),
           staffId:       null,
@@ -174,7 +133,7 @@ async function syncBookingsToJobs(db, branch, dateStr) {
   }
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────────────
+
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
@@ -193,50 +152,45 @@ module.exports = async function handler(req, res) {
     // ══════════════════════════════════════════════════════════════════════
     if (resource === 'debug') {
       if (req.method !== 'GET') return res.status(405).end();
-      const dbName = getDbName(MONGODB_URI);
-      const cols   = await db.listCollections().toArray();
-      const colNames = cols.map(c => c.name);
+      const dbName  = getDbName(MONGODB_URI);
+      const allBookings = await db.collection('bookings').find({}).toArray();
 
-      // Try each collection
-      const results = {};
-      for (const col of colNames) {
-        try {
-          const count = await db.collection(col).countDocuments();
-          results[col] = { count };
-          if (col.toLowerCase().includes('book')) {
-            const sample = await db.collection(col).findOne();
-            results[col].sample = sample ? {
-              _id: sample._id,
-              date: sample.date,
-              branch: sample.branch,
-              status: sample.status,
-              services: sample.services,
-              bookingId: sample.bookingId,
-            } : null;
+      // Simulate exactly what syncBookingsToJobs does
+      const dayStart = new Date(`${date}T00:00:00.000Z`);
+      dayStart.setMinutes(dayStart.getMinutes() - 330);
+      const dayEnd = new Date(`${date}T23:59:59.999Z`);
+      const branchRegex = new RegExp(branch, 'i');
 
-            // Try the actual query
-            const dayStart = new Date(`${date}T00:00:00.000Z`);
-            dayStart.setMinutes(dayStart.getMinutes() - 330);
-            const dayEnd = new Date(`${date}T23:59:59.999Z`);
-            const found = await db.collection(col).find({
-              date: { $gte: dayStart, $lte: dayEnd },
-            }).toArray();
-            results[col].foundForDate = found.length;
-            results[col].dayStart = dayStart;
-            results[col].dayEnd = dayEnd;
-            if (found.length > 0) {
-              results[col].firstFound = {
-                date: found[0].date,
-                branch: found[0].branch,
-                status: found[0].status,
-              };
-            }
-          }
-        } catch(e) {
-          results[col] = { error: e.message };
-        }
-      }
-      return res.status(200).json({ dbName, collections: colNames, details: results });
+      const queryResult = await db.collection('bookings').find({
+        $or: [
+          { 'branch.name': { $regex: branchRegex } },
+          { 'branch.name': branch },
+          { branch: { $regex: branchRegex } },
+          { branch: branch },
+        ],
+        date: { $gte: dayStart, $lte: dayEnd },
+        status: { $nin: ['Cancelled', 'Completed', 'cancelled', 'completed'] },
+      }).toArray();
+
+      return res.status(200).json({
+        dbName,
+        queryParams: { branch, date, dayStart, dayEnd },
+        allBookingsCount: allBookings.length,
+        allBookings: allBookings.map(b => ({
+          bookingId:  b.bookingId,
+          date:       b.date,
+          branchName: b.branch?.name,
+          status:     b.status,
+          services:   b.services?.map(s => s.name),
+        })),
+        queryMatchCount: queryResult.length,
+        queryMatches: queryResult.map(b => ({
+          bookingId:  b.bookingId,
+          date:       b.date,
+          branchName: b.branch?.name,
+          status:     b.status,
+        })),
+      });
     }
 
     // ══════════════════════════════════════════════════════════════════════
