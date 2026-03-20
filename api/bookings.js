@@ -88,7 +88,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── POST — create booking ────────────────────────────────────────────
+    // ── POST — create booking ──────────────────────────────────
     if (req.method === 'POST') {
       const body = req.body;
       if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
