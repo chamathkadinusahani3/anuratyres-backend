@@ -35,12 +35,23 @@ module.exports = async function handler(req, res) {
 
     // ── GET: list staff for board ─────────────────────────────────────────
     if (req.method === 'GET') {
-      if (!branch || !date) return res.status(400).json({ error: 'branch and date required' });
+      const today = new Date().toISOString().split('T')[0];
+      const queryDate = date || today;
 
-      const members = await staffCol.find({ branch, active: true }).toArray();
-      const dayStatuses = await dayCol.find({ branch, date }).toArray();
+      // If branch provided → filter by branch (for job board)
+      // If no branch → return ALL staff (for admin staff directory)
+      const memberQuery = branch
+        ? { branch, active: true }
+        : { active: true };
+
+      const members = await staffCol.find(memberQuery).toArray();
+
+      // Day statuses only relevant when branch+date given
       const statusMap = {};
-      dayStatuses.forEach(s => { statusMap[s.staffId.toString()] = s; });
+      if (branch) {
+        const dayStatuses = await dayCol.find({ branch, date: queryDate }).toArray();
+        dayStatuses.forEach(s => { statusMap[s.staffId.toString()] = s; });
+      }
 
       return res.status(200).json(members.map(m => ({
         id:       m._id,
