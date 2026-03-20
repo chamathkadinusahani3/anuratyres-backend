@@ -3,7 +3,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// ─── DB connection ────────────────────────────────────────────────────────────
+// ─── DB connection ────────────────────────────────────────────────────
 let cachedClient = null;
 function getDbName(uri) {
   if (!uri) return 'anura-tyres';
@@ -29,7 +29,7 @@ function generateBookingId() {
   return `BK-${random}${timestamp}`.slice(0, 10);
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────────────
+// ─── Main handler ──────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
