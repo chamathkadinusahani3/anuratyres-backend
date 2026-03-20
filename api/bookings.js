@@ -1,142 +1,101 @@
-// /api/bookings.js
-const { MongoClient, ObjectId } = require('mongodb');
+import { connectToDatabase } from "../lib/mongodb.js";
+import Booking from "../models/Booking.js";
+import { setCorsHeaders, handleOptionsRequest } from "../lib/cors.js";
 
-const MONGODB_URI = process.env.MONGODB_URI;
-
-// ─── DB connection ────────────────────────────────────────────────────────────
-let cachedClient = null;
-function getDbName(uri) {
-  if (!uri) return 'anura-tyres';
-  const match = uri.match(/\/([^/?]+)(\?|$)/);
-  return (match && match[1]) ? match[1] : 'anura-tyres';
-}
-async function getDb() {
-  if (!cachedClient) cachedClient = await MongoClient.connect(MONGODB_URI);
-  return cachedClient.db(getDbName(MONGODB_URI));
-}
-
-// ─── CORS headers ─────────────────────────────────────────────────────────────
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin',  '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-}
-
-// ─── Booking ID generator ─────────────────────────────────────────────────────
 function generateBookingId() {
   const timestamp = Date.now().toString().slice(-4);
-  const random    = Math.floor(Math.random() * 9000) + 1000;
+  const random = Math.floor(Math.random() * 9000) + 1000;
   return `BK-${random}${timestamp}`.slice(0, 10);
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────────────
-module.exports = async function handler(req, res) {
-  setCors(res);
-  if (req.method === 'OPTIONS') return res.status(200).end();
+export default async function handler(req, res) {
+  setCorsHeaders(req, res);
+
+  if (handleOptionsRequest(req, res)) return;
 
   try {
-    const db  = await getDb();
-    const col = db.collection('bookings');
+    await connectToDatabase();
 
-    // ── GET — list bookings ───────────────────────────────────────────────────
     if (req.method === 'GET') {
       const { status, search, date, limit = 50 } = req.query;
-      const query = {};
+      let query = {};
 
-      if (status && status !== 'all') query.status = status;
+      if (status && status !== 'all') {
+        query.status = status;
+      }
 
       if (search) {
         query.$or = [
-          { bookingId:       { $regex: search, $options: 'i' } },
+          { bookingId: { $regex: search, $options: 'i' } },
           { 'customer.name': { $regex: search, $options: 'i' } },
-          { 'customer.email':{ $regex: search, $options: 'i' } },
+          { 'customer.email': { $regex: search, $options: 'i' } }
         ];
       }
 
+      // ✅ Date filter support
       if (date) {
-        // Sri Lanka UTC+5:30 — search full local day
-        const start = new Date(`${date}T00:00:00.000Z`);
-        start.setMinutes(start.getMinutes() - 330);
-        const end = new Date(`${date}T23:59:59.999Z`);
-        query.date = { $gte: start, $lte: end };
+        const start = new Date(date);
+        const end = new Date(date);
+        end.setDate(end.getDate() + 1);
+        query.date = { $gte: start, $lt: end };
       }
 
-      const bookings = await col
-        .find(query)
+      const bookings = await Booking.find(query)
         .sort({ createdAt: -1 })
-        .limit(parseInt(limit))
-        .toArray();
+        .limit(parseInt(limit));
 
       return res.status(200).json({
         success: true,
         count: bookings.length,
         bookings: bookings.map(b => ({
-          id:       b.bookingId,
-          date:     b.date
-            ? (() => { const d = new Date(b.date); d.setMinutes(d.getMinutes() + 330); return d.toISOString().split('T')[0]; })()
-            : '',
-          customer: b.customer?.name   || '',
-          vehicle:  b.customer?.vehicleNo || 'N/A',
-          service:  Array.isArray(b.services) ? b.services.map(s => s.name).join(', ') : '',
-          status:   b.status,
-          amount:   b.amount,
-          email:    b.customer?.email  || '',
-          phone:    b.customer?.phone  || '',
-          branch:   b.branch?.name     || '',
-          timeSlot: b.timeSlot         || '',
-        })),
+          id: b.bookingId,          // ✅ always the BK-XXXX string, no fullData
+          date: b.date ? b.date.toISOString().split('T')[0] : '',
+          customer: b.customer?.name || '',
+          vehicle: b.customer?.vehicleNo || 'N/A',
+          service: b.services?.map(s => s.name).join(', ') || '',
+          status: b.status,
+          amount: b.amount,
+          email: b.customer?.email || '',
+          phone: b.customer?.phone || '',
+          branch: b.branch?.name || '',
+          timeSlot: b.timeSlot || '',
+        }))
       });
     }
 
-    // ── POST — create booking ────────────────────────────────────
     if (req.method === 'POST') {
-      const body = req.body;
-      if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
-        return res.status(400).json({ success: false, message: 'Customer name, email and phone are required' });
-      }
-      if (!body.date) {
-        return res.status(400).json({ success: false, message: 'Date is required' });
-      }
-      if (!body.timeSlot) {
-        return res.status(400).json({ success: false, message: 'Time slot is required' });
-      }
-
       const bookingId = generateBookingId();
-      const doc = {
+      const booking = new Booking({
         bookingId,
-        firebaseUid: body.firebaseUid || null,
-        branch:      body.branch   || null,
-        category:    body.category || '',
-        services:    Array.isArray(body.services) ? body.services : [],
-        date:        new Date(body.date),
-        timeSlot:    body.timeSlot,
-        customer:    body.customer,
-        status:      'Pending',
-        amount:      body.amount || '0',
-        createdAt:   new Date(),
-        updatedAt:   new Date(),
-      };
+        ...req.body,
+        status: 'Pending'
+      });
+      await booking.save();
 
-      await col.insertOne(doc);
       console.log('📧 Booking Created:', bookingId);
 
       return res.status(201).json({
-        success:  true,
-        message:  'Booking created successfully',
+        success: true,
+        message: 'Booking created successfully',
         booking: {
-          bookingId,
-          customer:  doc.customer,
-          date:      doc.date,
-          timeSlot:  doc.timeSlot,
-          branch:    doc.branch,
-        },
+          bookingId: booking.bookingId,
+          customer: booking.customer,
+          date: booking.date,
+          timeSlot: booking.timeSlot,
+          branch: booking.branch
+        }
       });
     }
 
-    return res.status(405).json({ error: 'Method not allowed' });
+    res.setHeader('Allow', ['GET', 'POST']);
+    return res.status(405).end(`Method ${req.method} Not Allowed`);
 
-  } catch (err) {
-    console.error('bookings.js error:', err);
-    return res.status(500).json({ success: false, message: 'Server error', error: err.message });
+  } catch (error) {
+    console.error('Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error',
+      error: error.message
+    });
   }
-};
+}

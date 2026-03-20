@@ -2,7 +2,6 @@
   "version": 2,
   "builds": [
     { "src": "api/*.js", "use": "@vercel/node" }
-    /////
   ],
   "routes": [
     {
@@ -16,8 +15,8 @@
     },
     { "src": "/api/bookings/stats/summary",      "dest": "/api/bookings.js" },
     { "src": "/api/bookings/availability",       "dest": "/api/availability.js" },
-    { "src": "/api/bookings/([^/]+)/status",     "dest": "/api/booking.js" },
-    { "src": "/api/bookings/([^/]+)",            "dest": "/api/booking.js" },
+    { "src": "/api/bookings/([^/]+)/status",     "dest": "/api/[id].js" },
+    { "src": "/api/bookings/([^/]+)",            "dest": "/api/[id].js" },
     { "src": "/api/bookings",                    "dest": "/api/bookings.js" },
     { "src": "/api/corporate/(.*)",              "dest": "/api/corporate.js" },
     { "src": "/api/corporate",                   "dest": "/api/corporate.js" },
