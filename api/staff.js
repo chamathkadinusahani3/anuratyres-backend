@@ -138,7 +138,7 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: 'Unknown action' });
     }
 
-    // ── PATCH: day status (clock in, break, bay) ──────────────────────────
+    // ── PATCH: day status (clock in, break, bay) ────────────────────
     if (req.method === 'PATCH') {
       const staffId = id || req.body?.staffId;
       if (!staffId) return res.status(400).json({ error: 'staffId required' });
