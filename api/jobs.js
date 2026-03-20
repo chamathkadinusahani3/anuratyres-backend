@@ -339,7 +339,7 @@ module.exports = async function handler(req, res) {
       })));
     }
 
-    // ── CREATE MANUAL JOB ──────────────────────────────────────────────────────
+    // ── CREATE MANUAL JOB ───────────────────────────────────
     if (req.method === 'POST') {
       const { branch: b, date: d, vehiclePlate, customerName, customerPhone, service, timeSlot } = req.body;
       if (!b || !d || !service) return res.status(400).json({ error: 'branch, date, service required' });
