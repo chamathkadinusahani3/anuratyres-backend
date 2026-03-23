@@ -1,5 +1,5 @@
 // /api/availability.js
-// GET  /api/bookings/availability?branch=X&date=YYYY-MM-DD
+//  GET  /api/bookings/availability?branch=X&date=YYYY-MM-DD
 const { MongoClient } = require('mongodb');
 
 const MONGODB_URI = process.env.MONGODB_URI;

@@ -129,7 +129,7 @@ export default async function handler(req, res) {
       return res.status(201).json({ success: true, message: 'Registration successful', corporateCode });
     }
 
-    // POST /api/corporate/register-employee
+    //  POST /api/corporate/register-employee
     if (req.method === 'POST' && action === 'register-employee') {
       const { employeeName, employeeEmail, employeePhone, corporateCode, vehicleNo, department, employeeId } = req.body;
       if (!employeeName?.trim())         return res.status(400).json({ success: false, message: 'Name is required' });

@@ -125,7 +125,7 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
       }
 
-      // DEACTIVATE
+      //  DEACTIVATE
       if (action === 'deactivate') {
         const { id: uid } = req.body;
         if (!uid) return res.status(400).json({ error: 'id required' });

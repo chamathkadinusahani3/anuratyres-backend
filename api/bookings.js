@@ -15,7 +15,7 @@ async function getDb() {
   return cachedClient.db(getDbName(MONGODB_URI));
 }
 
-// ─── CORS headers ─────────────────────────────────────────────────
+// ─── CORS headers  ─────────────────────────────────────────────────
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');

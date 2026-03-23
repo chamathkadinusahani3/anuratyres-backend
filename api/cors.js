@@ -1,5 +1,5 @@
 // /api/cors.js
-// Shared CORS helper — required by staff.js, jobs.js, etc.
+//  Shared CORS helper — required by staff.js, jobs.js, etc.
 
 function setCorsHeaders(req, res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');

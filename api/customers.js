@@ -153,7 +153,7 @@ export default async function handler(req, res) {
       })
     );
 
-    // Sort by most recently created
+    //  Sort by most recently created
     customers.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
     return res.status(200).json({

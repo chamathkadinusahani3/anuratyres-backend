@@ -1,4 +1,4 @@
-//  /api/bookings/stats/summary.js
+//   /api/bookings/stats/summary.js
 const { MongoClient } = require('mongodb');
 
 const MONGODB_URI = process.env.MONGODB_URI;
