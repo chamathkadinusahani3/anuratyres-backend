@@ -3,7 +3,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// ─── DB connection ────────────────────────────────────────────────────────────
+// ─── DB connection ────────────────────────────────────────────────────
 let cachedClient = null;
 function getDbName(uri) {
   if (!uri) return 'anura-tyres';
@@ -15,7 +15,7 @@ async function getDb() {
   return cachedClient.db(getDbName(MONGODB_URI));
 }
 
-// ─── CORS headers ─────────────────────────────────────────────────────────────
+// ─── CORS headers  ─────────────────────────────────────────────────
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
@@ -29,7 +29,7 @@ function generateBookingId() {
   return `BK-${random}${timestamp}`.slice(0, 10);
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────────────
+// ─── Main handler ──────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -88,7 +88,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── POST — create booking ─────────────────────────────────────────────────
+    // ── POST — create booking ──────────────────────────────────
     if (req.method === 'POST') {
       const body = req.body;
       if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
