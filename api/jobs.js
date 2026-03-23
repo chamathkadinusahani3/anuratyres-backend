@@ -45,13 +45,27 @@ async function syncBookingsToJobs(db, branch, dateStr) {
   const dayEnd   = new Date(`${dateStr}T23:59:59.999Z`);
   const branchRegex = new RegExp(branch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
+  // Match bookings for this branch+date
+  // Some bookings may have no branch.name (saved with undefined) — catch those too
   const bookings = await db.collection('bookings').find({
-    'branch.name': { $regex: branchRegex },
+    $or: [
+      { 'branch.name': { $regex: branchRegex } },  // website: full name contains branch
+      { 'branch.name': null },                       // admin manual: branch.name was undefined
+      { 'branch.name': { $exists: false } },         // completely missing
+      { branch: null },                              // branch field itself is null
+    ],
     date:   { $gte: dayStart, $lte: dayEnd },
     status: { $nin: ['Cancelled', 'Completed'] },
   }).toArray();
 
-  for (const booking of bookings) {
+  // Filter out bookings that belong to a DIFFERENT branch (have a name but wrong one)
+  const filtered = bookings.filter(b => {
+    const bName = b.branch?.name;
+    if (!bName) return true; // no branch name — assume belongs to current branch
+    return branchRegex.test(bName);
+  });
+
+  for (const booking of filtered) {
     const bookingIdStr = booking._id.toString();
     const services = Array.isArray(booking.services)
       ? booking.services.map(s => (typeof s === 'string' ? s : s.name)).filter(Boolean)
@@ -91,6 +105,15 @@ module.exports = async function handler(req, res) {
     const jobsCol   = db.collection('job_assignments');
     const timersCol = db.collection('job_timers');
     const { resource, id, branch, date } = req.query;
+
+    // ── FORCE SYNC — POST ?resource=sync&branch=X&date=Y ─────────────────────────
+    if (resource === 'sync') {
+      if (req.method !== 'POST') return res.status(405).end();
+      if (!branch || !date) return res.status(400).json({ error: 'branch and date required' });
+      await syncBookingsToJobs(db, branch, date);
+      const count = await jobsCol.countDocuments({ branch, date });
+      return res.status(200).json({ ok: true, jobCount: count });
+    }
 
     // ── DEBUG ──────────────────────────────────────────────────────────────────
     if (resource === 'debug') {
@@ -339,7 +362,7 @@ module.exports = async function handler(req, res) {
       })));
     }
 
-    // ── CREATE MANUAL JOB ─────────────────────────────────────────────────────
+    // ── CREATE MANUAL JOB ──────────────────────────────────────────────────────
     if (req.method === 'POST') {
       const { branch: b, date: d, vehiclePlate, customerName, customerPhone, service, timeSlot } = req.body;
       if (!b || !d || !service) return res.status(400).json({ error: 'branch, date, service required' });
