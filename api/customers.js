@@ -91,7 +91,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // 3. For each user fetch Firestore sub-collections
+    // 3.  For each user fetch Firestore sub-collections
     const customers = await Promise.all(
       allUsers.map(async (user) => {
         try {

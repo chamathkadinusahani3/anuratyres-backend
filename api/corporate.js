@@ -1,5 +1,5 @@
 // api/corporate.js
-import { MongoClient, ObjectId } from 'mongodb';
+const { MongoClient, ObjectId } = require('mongodb');
 
 const uri = process.env.MONGODB_URI;
 
@@ -25,7 +25,7 @@ function getAction(req) {
   return parts[parts.length - 1] || '';
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
 
@@ -129,7 +129,7 @@ export default async function handler(req, res) {
       return res.status(201).json({ success: true, message: 'Registration successful', corporateCode });
     }
 
-    //  POST /api/corporate/register-employee
+    // POST /api/corporate/register-employee
     if (req.method === 'POST' && action === 'register-employee') {
       const { employeeName, employeeEmail, employeePhone, corporateCode, vehicleNo, department, employeeId } = req.body;
       if (!employeeName?.trim())         return res.status(400).json({ success: false, message: 'Name is required' });
