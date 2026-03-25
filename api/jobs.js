@@ -4,7 +4,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 const MONGODB_URI = process.env.MONGODB_URI;
 
 const SERVICE_TIMES = {
-  'Wheel Balancing':        20, 'Wheel Alignment':        20,
+  'Wheel Balancing':        1, 'Wheel Alignment':        20,
   'Front Tyre Change':      20, 'Rear Tyre Change':        20,
   'Both Front Tyres':       30, 'Both Rear Tyres':         30,
   'All 4 Tyres':            50, 'Single Tyre Change':      20,
