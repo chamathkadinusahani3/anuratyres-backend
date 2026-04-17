@@ -1,4 +1,5 @@
 // /api/bookings.js
+
 const { MongoClient } = require('mongodb');
 
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -9,7 +10,7 @@ let cachedClient = null;
 function getDbName(uri) {
   if (!uri) return 'anura-tyres';
   const match = uri.match(/\/([^/?]+)(\?|$)/);
-  return (match && match[1]) ? match[1] : 'anura-tyres';
+  return match && match[1] ? match[1] : 'anura-tyres';
 }
 
 async function getDb() {
@@ -26,14 +27,21 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
-// ─── Fallback Booking ID generator (only if frontend fails) ──────
+// ─── NEW BOOKING ID GENERATOR ─────────────────────────────────────
 function generateBookingId() {
-  const timestamp = Date.now().toString().slice(-4);
-  const random = Math.floor(Math.random() * 9000) + 1000;
-  return `BK-${random}${timestamp}`.slice(0, 12);
+  const now = new Date();
+
+  // YYYYMMDD
+  const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
+
+  // random 4 uppercase letters
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const randomPart = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
+
+  return `HV-ANU-${datePart}-${randomPart}`;
 }
 
-// ─── Main handler ────────────────────────────────────────────────
+// ─── MAIN HANDLER ─────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   setCors(res);
 
@@ -45,9 +53,10 @@ module.exports = async function handler(req, res) {
     const db = await getDb();
     const col = db.collection('bookings');
 
-    // ───────────────── GET ─────────────────
+    // ─── GET BOOKINGS ────────────────────────────────────────────
     if (req.method === 'GET') {
       const { status, search, date, limit = 50 } = req.query;
+
       const query = {};
 
       if (status && status !== 'all') {
@@ -79,11 +88,8 @@ module.exports = async function handler(req, res) {
 
       return res.status(200).json({
         success: true,
-        count: bookings.length,
         bookings: bookings.map(b => ({
-          id: b.bookingId, // ✅ IMPORTANT: use bookingId
-          bookingId: b.bookingId,
-
+          id: b.bookingId, // IMPORTANT
           date: b.date
             ? (() => {
                 const d = new Date(b.date);
@@ -91,31 +97,25 @@ module.exports = async function handler(req, res) {
                 return d.toISOString().split('T')[0];
               })()
             : '',
-
           customer: b.customer?.name || '',
           vehicle: b.customer?.vehicleNo || 'N/A',
-
           service: Array.isArray(b.services)
             ? b.services.map(s => s.name).join(', ')
             : '',
-
           status: b.status,
-          amount: b.amount || '0',
-
+          amount: b.amount,
           email: b.customer?.email || '',
           phone: b.customer?.phone || '',
-
           branch: b.branch?.name || '',
           timeSlot: b.timeSlot || '',
         })),
       });
     }
 
-    // ───────────────── POST ─────────────────
+    // ─── CREATE BOOKING ──────────────────────────────────────────
     if (req.method === 'POST') {
       const body = req.body;
 
-      // ✅ VALIDATION
       if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
         return res.status(400).json({
           success: false,
@@ -123,81 +123,48 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      if (!body.date) {
+      if (!body.date || !body.timeSlot) {
         return res.status(400).json({
           success: false,
-          message: 'Date is required',
+          message: 'Date and time slot are required',
         });
       }
 
-      if (!body.timeSlot) {
-        return res.status(400).json({
-          success: false,
-          message: 'Time slot is required',
-        });
-      }
-
-      // ✅ CRITICAL FIX: USE FRONTEND bookingId
-      const finalBookingId = body.bookingId || generateBookingId();
+      const bookingId = generateBookingId();
 
       const doc = {
-        bookingId: finalBookingId, // ✅ FIXED
-
+        bookingId,
         firebaseUid: body.firebaseUid || null,
-
         branch: body.branch || null,
         category: body.category || '',
-
         services: Array.isArray(body.services) ? body.services : [],
-
         date: new Date(body.date),
         timeSlot: body.timeSlot,
-
-        customer: {
-          name: body.customer.name,
-          email: body.customer.email,
-          phone: body.customer.phone,
-          vehicleNo: body.customer.vehicleNo || '',
-        },
-
+        customer: body.customer,
         status: 'Pending',
         amount: body.amount || '0',
-
-        ...(body.discountInfo ? {
-          discountInfo: body.discountInfo,
-          discountCode: body.discountCode,
-        } : {}),
-
         createdAt: new Date(),
         updatedAt: new Date(),
       };
 
       await col.insertOne(doc);
 
-      console.log('✅ Booking Created:', finalBookingId);
-
       return res.status(201).json({
         success: true,
         message: 'Booking created successfully',
         booking: {
-          bookingId: finalBookingId,
-          customer: doc.customer,
-          date: doc.date,
-          timeSlot: doc.timeSlot,
-          branch: doc.branch,
+          bookingId,
         },
       });
     }
 
-    // ────
-    // ─── FALLBACK ────────────
     return res.status(405).json({
       success: false,
       message: 'Method not allowed',
     });
 
   } catch (err) {
-    console.error('❌ bookings.js error:', err);
+    console.error('bookings.js error:', err);
 
     return res.status(500).json({
       success: false,
