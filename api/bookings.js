@@ -130,8 +130,7 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const bookingId = generateBookingId();
-
+      const bookingId = body.bookingId || generateBookingId();
       const doc = {
         bookingId,
         firebaseUid: body.firebaseUid || null,
