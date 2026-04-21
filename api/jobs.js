@@ -276,7 +276,6 @@ module.exports = async function handler(req, res) {
       }
 
       if (action === 'stop') {
-        const { stopReason } = req.body;                          // ← new
         const timer = await timersCol.findOne({ jobId: jid });
         if (!timer) return res.status(404).json({ error: 'Timer not found' });
         const job   = await jobsCol.findOne({ _id: jid });
@@ -289,28 +288,13 @@ module.exports = async function handler(req, res) {
         const allocatedSecs  = (job?.allocatedMins || 30) * 60;
         const isOvertime     = activeWorkSecs > allocatedSecs;
         const overtimeSecs   = isOvertime ? activeWorkSecs - allocatedSecs : 0;
-
-        await timersCol.updateOne({ jobId: jid }, {
-          $set: {
-            stoppedAt: now, totalElapsedSecs, totalPausedSecs,
-            activeWorkSecs, isOvertime, overtimeSecs,
-            stopReason: stopReason || 'Completed',              
-          }
-        });
-
-        // Map stopReason to final job status
-        const finalStatus = (stopReason === 'Terminate' || stopReason === 'Stock issue' || stopReason === 'Price disagree')
-          ? 'terminated'   // ← differentiate from normal 'done' if you want
-          : 'done';
-
-        await jobsCol.updateOne({ _id: jid }, {
-          $set: { status: finalStatus, stopReason: stopReason || 'Completed', updatedAt: now }  // ← new
-        });
-
+        await timersCol.updateOne({ jobId: jid },
+          { $set: { stoppedAt: now, totalElapsedSecs, totalPausedSecs, activeWorkSecs, isOvertime, overtimeSecs } });
+        await jobsCol.updateOne({ _id: jid }, { $set: { status: 'done', updatedAt: now } });
         if (job?.chainedToJob) {
           await jobsCol.updateOne({ _id: job.chainedToJob }, { $set: { status: 'assigned', updatedAt: now } });
         }
-        return res.status(200).json({ ok: true, activeWorkSecs, isOvertime, overtimeSecs, stopReason });
+        return res.status(200).json({ ok: true, activeWorkSecs, isOvertime, overtimeSecs });
       }
 
       return res.status(400).json({ error: 'Unknown action' });
