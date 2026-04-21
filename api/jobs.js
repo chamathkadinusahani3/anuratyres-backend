@@ -294,7 +294,7 @@ module.exports = async function handler(req, res) {
           $set: {
             stoppedAt: now, totalElapsedSecs, totalPausedSecs,
             activeWorkSecs, isOvertime, overtimeSecs,
-            stopReason: stopReason || 'Completed',              // ← new
+            stopReason: stopReason || 'Completed',              
           }
         });
 
