@@ -27,17 +27,12 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
-// ─── NEW BOOKING ID GENERATOR ─────────────────────────────────────
+// ─── BOOKING ID GENERATOR (fallback for old clients) ─────────────
 function generateBookingId() {
   const now = new Date();
-
-  // YYYYMMDD
   const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-
-  // random 4 uppercase letters
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const randomPart = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
-
   return `HV-ANU-${datePart}-${randomPart}`;
 }
 
@@ -74,9 +69,7 @@ module.exports = async function handler(req, res) {
       if (date) {
         const start = new Date(`${date}T00:00:00.000Z`);
         start.setMinutes(start.getMinutes() - 330);
-
         const end = new Date(`${date}T23:59:59.999Z`);
-
         query.date = { $gte: start, $lte: end };
       }
 
@@ -89,7 +82,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         success: true,
         bookings: bookings.map(b => ({
-          id: b.bookingId, // IMPORTANT
+          id: b.bookingId,
           date: b.date
             ? (() => {
                 const d = new Date(b.date);
@@ -130,7 +123,24 @@ module.exports = async function handler(req, res) {
         });
       }
 
+      // ── Use frontend-provided ID, or generate one as fallback ────
       const bookingId = body.bookingId || generateBookingId();
+
+      // ── DUPLICATE GUARD — if this bookingId already exists, return
+      //    the existing booking instead of inserting a second record.
+      //    This is the server-side safety net against double-POSTs
+      //    caused by React StrictMode or network retries.
+      const existing = await col.findOne({ bookingId });
+      if (existing) {
+        console.warn(`Duplicate POST blocked for bookingId: ${bookingId}`);
+        return res.status(200).json({
+          success: true,
+          message: 'Booking already exists',
+          booking: { bookingId },
+          duplicate: true,
+        });
+      }
+
       const doc = {
         bookingId,
         firebaseUid: body.firebaseUid || null,
@@ -142,6 +152,7 @@ module.exports = async function handler(req, res) {
         customer: body.customer,
         status: 'Pending',
         amount: body.amount || '0',
+        source: body.source || 'website',
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -151,9 +162,7 @@ module.exports = async function handler(req, res) {
       return res.status(201).json({
         success: true,
         message: 'Booking created successfully',
-        booking: {
-          bookingId,
-        },
+        booking: { bookingId },
       });
     }
 
@@ -164,7 +173,6 @@ module.exports = async function handler(req, res) {
 
   } catch (err) {
     console.error('bookings.js error:', err);
-
     return res.status(500).json({
       success: false,
       message: 'Server error',
