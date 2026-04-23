@@ -28,11 +28,6 @@ function setCors(res) {
 }
 
 // ─── EXTRACT & VALIDATE USER ─────────────────────────────────────
-/**
- * Extract user role and branch from request headers.
- * Frontend sends: X-User-Role (Super Admin|Admin|Manager|Cashier)
- *                 X-User-Branch (branch name or empty for admins)
- */
 function getUserFromHeaders(req) {
   const role = req.headers['x-user-role']?.trim() || 'Cashier';
   const branch = req.headers['x-user-branch']?.trim() || '';
@@ -44,7 +39,6 @@ function getUserFromHeaders(req) {
 
   const canSeeAllBranches = ['Super Admin', 'Admin'].includes(role);
 
-  // Manager & Cashier MUST have a branch
   if (!canSeeAllBranches && !branch) {
     throw new Error(`${role} must have a branch specified`);
   }
@@ -52,13 +46,45 @@ function getUserFromHeaders(req) {
   return { role, branch, canSeeAllBranches };
 }
 
-// ─── BOOKING ID GENERATOR (fallback for old clients) ─────────────
-function generateBookingId() {
-  const now = new Date();
-  const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const randomPart = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
-  return `HV-ANU-${datePart}-${randomPart}`;
+// ─── SERVICE CODE MAP ─────────────────────────────────────────────
+const SERVICE_CODE_MAP = {
+  'wheel balancing': 'WB', 'wheel alignment': 'AL', 'tyre replacement': 'TR',
+  'tire replacement': 'TR', 'tyre rotation': 'RT', 'tire rotation': 'RT',
+  'nitrogen filling': 'NF', 'flat repair': 'FR', 'puncture repair': 'PR',
+  'brake service': 'BS', 'suspension check': 'SC', 'oil change': 'OC',
+  'battery service': 'BAT', 'battery check': 'BAT', 'battery check & replace': 'BAT',
+  'wheel change': 'WC', 'tyre change': 'TC', 'full service': 'FS',
+  'ac service': 'AC', 'heavy vehicle': 'HV', 'heavy vehicle alignment': 'HV',
+  'truck tyre': 'TT', 'truck tyre change': 'TT', 'bus full': 'BF',
+  'bus full service': 'BF', 'tyre repair (puncture)': 'PR',
+};
+
+function getServiceCode(serviceName) {
+  const key = serviceName.toLowerCase().trim();
+  if (SERVICE_CODE_MAP[key]) return SERVICE_CODE_MAP[key];
+  for (const [k, v] of Object.entries(SERVICE_CODE_MAP)) {
+    if (key.includes(k.split(' ')[0])) return v;
+  }
+  return serviceName.replace(/[^a-zA-Z]/g, '').slice(0, 2).toUpperCase() || 'SV';
+}
+
+function generateBookingId(serviceNames, branchName, date) {
+  const prefixes = [...new Set(serviceNames.map(s => getServiceCode(s)))];
+  const serviceSegment = prefixes.length > 0 ? prefixes.join('-') : 'SV';
+  const branchSegment = branchName.replace(/[^a-zA-Z]/g, '').slice(0, 3).toUpperCase() || 'HQ';
+  
+  const d = new Date(date);
+  const dateSegment = 
+    d.getFullYear().toString() +
+    String(d.getMonth() + 1).padStart(2, '0') +
+    String(d.getDate()).padStart(2, '0');
+  
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const random = Array.from({ length: 4 }, () =>
+    chars[Math.floor(Math.random() * chars.length)]
+  ).join('');
+  
+  return `${serviceSegment}-${branchSegment}-${dateSegment}-${random}`;
 }
 
 // ─── MAIN HANDLER ─────────────────────────────────────────────────
@@ -90,9 +116,8 @@ module.exports = async function handler(req, res) {
       const query = {};
 
       // ── BRANCH ACCESS CONTROL ────────────────────────────────────
-      // Manager/Cashier can ONLY see their branch bookings
       if (!user.canSeeAllBranches) {
-        query['branch.name'] = user.branch; // Filter by exact branch name
+        query['branch.name'] = user.branch;
       }
 
       if (status && status !== 'all') {
@@ -185,7 +210,6 @@ module.exports = async function handler(req, res) {
       }
 
       // ── AUTHORIZATION CHECK ──────────────────────────────────────
-      // Manager/Cashier can ONLY create bookings for their branch
       if (!user.canSeeAllBranches && body.branch.name !== user.branch) {
         return res.status(403).json({
           success: false,
@@ -193,7 +217,12 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      const bookingId = body.bookingId || generateBookingId();
+      // ── GENERATE BOOKING ID (UNIFIED FORMAT) ─────────────────────
+      // Always use the service-based format: SERVICE-BRANCH-DATE-RANDOM
+      const serviceNames = Array.isArray(body.services)
+        ? body.services.map(s => s.name)
+        : [];
+      const bookingId = generateBookingId(serviceNames, body.branch.name, body.date);
 
       // ── DUPLICATE GUARD ──────────────────────────────────────────
       const existing = await col.findOne({ bookingId });
@@ -218,7 +247,7 @@ module.exports = async function handler(req, res) {
         customer: body.customer,
         status: 'Pending',
         amount: body.amount || '0',
-        source: body.source || 'website',
+        source: body.source || 'website', // 'website' or 'manual'
         createdAt: new Date(),
         updatedAt: new Date(),
       };
