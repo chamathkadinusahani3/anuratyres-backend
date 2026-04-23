@@ -39,7 +39,7 @@ function getUserFromHeaders(req) {
 
   const canSeeAllBranches = ['Super Admin', 'Admin'].includes(role);
 
-  // ✅ FIXED: Only enforce branch requirement for Manager/Cashier
+  // ── Manager/Cashier MUST have a branch; Admins should have empty string ──
   if (!canSeeAllBranches && !branch) {
     throw new Error(`${role} must have a branch specified`);
   }
