@@ -24,48 +24,10 @@ async function getDb() {
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Role, X-User-Branch');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
-// ─── EXTRACT & VALIDATE USER ─────────────────────────────────────
-/**
- * Extract user role and branch from request headers.
- * Frontend sends: X-User-Role (Super Admin|Admin|Manager|Cashier)
- *                 X-User-Branch (branch name or empty for admins)
- * 
- * Returns: { role, branch, canSeeAllBranches }
- * or throws 401 if invalid
- */
-function getUserFromHeaders(req) {
-  const role = req.headers['x-user-role']?.trim() || 'Cashier';
-  const branch = req.headers['x-user-branch']?.trim() || '';
-
-  const VALID_ROLES = ['Super Admin', 'Admin', 'Manager', 'Cashier'];
-  if (!VALID_ROLES.includes(role)) {
-    throw new Error(`Invalid role: ${role}`);
-  }
-
-  const canSeeAllBranches = ['Super Admin', 'Admin'].includes(role);
-
-  // ── Manager/Cashier MUST have a branch; Admins should have empty string ──
-  if (!canSeeAllBranches && !branch) {
-    throw new Error(`${role} must have a branch specified`);
-  }
-
-  return { role, branch, canSeeAllBranches };
-}
-
-  const canSeeAllBranches = ['Super Admin', 'Admin'].includes(role);
-
-  // ✅ FIXED: Only enforce branch requirement for Manager/Cashier
-  if (!canSeeAllBranches && !branch) {
-    throw new Error(`${role} must have a branch specified`);
-  }
-
-  return { role, branch, canSeeAllBranches };
-}
-
-// ─── BOOKING ID GENERATOR ────────────────────────────────────────
+// ─── BOOKING ID GENERATOR (fallback for old clients) ─────────────
 function generateBookingId() {
   const now = new Date();
   const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
@@ -88,25 +50,9 @@ module.exports = async function handler(req, res) {
 
     // ─── GET BOOKINGS ────────────────────────────────────────────
     if (req.method === 'GET') {
-      let user;
-      try {
-        user = getUserFromHeaders(req);
-      } catch (err) {
-        return res.status(401).json({
-          success: false,
-          message: err.message,
-        });
-      }
-
       const { status, search, date, limit = 50 } = req.query;
 
       const query = {};
-
-      // ── BRANCH ACCESS CONTROL ────────────────────────────────────
-      // Manager/Cashier can ONLY see their branch bookings
-      if (!user.canSeeAllBranches) {
-        query['branch.name'] = user.branch; // Filter by exact branch name
-      }
 
       if (status && status !== 'all') {
         query.status = status;
@@ -117,7 +63,6 @@ module.exports = async function handler(req, res) {
           { bookingId: { $regex: search, $options: 'i' } },
           { 'customer.name': { $regex: search, $options: 'i' } },
           { 'customer.email': { $regex: search, $options: 'i' } },
-          { 'customer.vehicleNo': { $regex: search, $options: 'i' } },
         ];
       }
 
@@ -131,7 +76,7 @@ module.exports = async function handler(req, res) {
       const bookings = await col
         .find(query)
         .sort({ createdAt: -1 })
-        .limit(Math.min(parseInt(limit), 500)) // Cap at 500
+        .limit(parseInt(limit))
         .toArray();
 
       return res.status(200).json({
@@ -157,23 +102,11 @@ module.exports = async function handler(req, res) {
           branch: b.branch?.name || '',
           timeSlot: b.timeSlot || '',
         })),
-        userRole: user.role,
-        userBranch: user.branch,
       });
     }
 
     // ─── CREATE BOOKING ──────────────────────────────────────────
     if (req.method === 'POST') {
-      let user;
-      try {
-        user = getUserFromHeaders(req);
-      } catch (err) {
-        return res.status(401).json({
-          success: false,
-          message: err.message,
-        });
-      }
-
       const body = req.body;
 
       if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
@@ -190,25 +123,13 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      if (!body.branch || !body.branch.name) {
-        return res.status(400).json({
-          success: false,
-          message: 'Branch information is required',
-        });
-      }
-
-      // ── AUTHORIZATION CHECK ──────────────────────────────────────
-      // Manager/Cashier can ONLY create bookings for their branch
-      if (!user.canSeeAllBranches && body.branch.name !== user.branch) {
-        return res.status(403).json({
-          success: false,
-          message: `You can only create bookings for ${user.branch} branch`,
-        });
-      }
-
+      // ── Use frontend-provided ID, or generate one as fallback ────
       const bookingId = body.bookingId || generateBookingId();
 
-      // ── DUPLICATE GUARD ──────────────────────────────────────────
+      // ── DUPLICATE GUARD — if this bookingId already exists, return
+      //    the existing booking instead of inserting a second record.
+      //    This is the server-side safety net against double-POSTs
+      //    caused by React StrictMode or network retries.
       const existing = await col.findOne({ bookingId });
       if (existing) {
         console.warn(`Duplicate POST blocked for bookingId: ${bookingId}`);
@@ -223,7 +144,7 @@ module.exports = async function handler(req, res) {
       const doc = {
         bookingId,
         firebaseUid: body.firebaseUid || null,
-        branch: body.branch, // { id, name, address, phone }
+        branch: body.branch || null,
         category: body.category || '',
         services: Array.isArray(body.services) ? body.services : [],
         date: new Date(body.date),
