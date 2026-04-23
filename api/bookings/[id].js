@@ -1,4 +1,4 @@
-// /api/[id].js — GET / PATCH / DELETE a single booking by bookingId
+// /api/[id].js
 
 const { MongoClient } = require('mongodb');
 
@@ -24,7 +24,26 @@ async function getDb() {
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Role, X-User-Branch');
+}
+
+// ─── EXTRACT & VALIDATE USER ─────────────────────────────────────
+function getUserFromHeaders(req) {
+  const role = req.headers['x-user-role']?.trim() || 'Cashier';
+  const branch = req.headers['x-user-branch']?.trim() || '';
+
+  const VALID_ROLES = ['Super Admin', 'Admin', 'Manager', 'Cashier'];
+  if (!VALID_ROLES.includes(role)) {
+    throw new Error(`Invalid role: ${role}`);
+  }
+
+  const canSeeAllBranches = ['Super Admin', 'Admin'].includes(role);
+
+  if (!canSeeAllBranches && !branch) {
+    throw new Error(`${role} must have a branch specified`);
+  }
+
+  return { role, branch, canSeeAllBranches };
 }
 
 // ─── Firebase Admin (optional sync) ──────────────────────────────
@@ -78,6 +97,17 @@ module.exports = async function handler(req, res) {
   }
 
   try {
+    // ── GET USER FROM HEADERS ────────────────────────────────────
+    let user;
+    try {
+      user = getUserFromHeaders(req);
+    } catch (err) {
+      return res.status(401).json({
+        success: false,
+        message: err.message,
+      });
+    }
+
     const db = await getDb();
     const col = db.collection('bookings');
 
@@ -89,6 +119,14 @@ module.exports = async function handler(req, res) {
         return res.status(404).json({
           success: false,
           message: 'Booking not found',
+        });
+      }
+
+      // ── CHECK BRANCH ACCESS ──────────────────────────────────────
+      if (!user.canSeeAllBranches && booking.branch?.name !== user.branch) {
+        return res.status(403).json({
+          success: false,
+          message: `You do not have access to bookings from ${booking.branch?.name || 'this'} branch`,
         });
       }
 
@@ -117,6 +155,23 @@ module.exports = async function handler(req, res) {
         });
       }
 
+      const booking = await col.findOne({ bookingId: id });
+
+      if (!booking) {
+        return res.status(404).json({
+          success: false,
+          message: `Booking not found: ${id}`,
+        });
+      }
+
+      // ── CHECK BRANCH ACCESS ──────────────────────────────────────
+      if (!user.canSeeAllBranches && booking.branch?.name !== user.branch) {
+        return res.status(403).json({
+          success: false,
+          message: `You cannot update bookings from ${booking.branch?.name || 'this'} branch`,
+        });
+      }
+
       const updateData = {
         updatedAt: new Date(),
       };
@@ -130,23 +185,16 @@ module.exports = async function handler(req, res) {
         { returnDocument: 'after' }
       );
 
-      const booking = result?.value;
-
-      if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: `Booking not found: ${id}`,
-        });
-      }
+      const updatedBooking = result?.value;
 
       // ─── Sync to Firestore (optional) ─────────────────────────
-      if (status && booking.firebaseUid && adminDb) {
+      if (status && updatedBooking.firebaseUid && adminDb) {
         try {
           await adminDb
             .collection('users')
-            .doc(booking.firebaseUid)
+            .doc(updatedBooking.firebaseUid)
             .collection('appointments')
-            .doc(booking.bookingId)
+            .doc(updatedBooking.bookingId)
             .update({
               status: STATUS_MAP[status] || 'upcoming',
               updatedAt: new Date().toISOString(),
@@ -159,15 +207,13 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         success: true,
         message: 'Booking updated successfully',
-        booking,
+        booking: updatedBooking,
       });
     }
 
-    // ─── DELETE booking ─────────────────────────
+    // ─── DELETE booking ─────────────────────────────────────────
     if (req.method === 'DELETE') {
-      const result = await col.findOneAndDelete({ bookingId: id });
-
-      const booking = result?.value;
+      const booking = await col.findOne({ bookingId: id });
 
       if (!booking) {
         return res.status(404).json({
@@ -175,6 +221,16 @@ module.exports = async function handler(req, res) {
           message: 'Booking not found',
         });
       }
+
+      // ── CHECK BRANCH ACCESS ──────────────────────────────────────
+      if (!user.canSeeAllBranches && booking.branch?.name !== user.branch) {
+        return res.status(403).json({
+          success: false,
+          message: `You cannot delete bookings from ${booking.branch?.name || 'this'} branch`,
+        });
+      }
+
+      await col.findOneAndDelete({ bookingId: id });
 
       return res.status(200).json({
         success: true,
