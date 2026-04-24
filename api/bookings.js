@@ -28,57 +28,76 @@ function setCors(res) {
 }
 
 // ─── CANONICAL BRANCH MAP ────────────────────────────────────────
-// Every known variant of each branch name maps to a single canonical key.
-// This solves the 3-way mismatch:
-//   Website sends  → "Anura Tyre Service Nivithigala"
-//   Manual sends   → "Nivithigala"          (shortName from BRANCHES array)
-//   Old DB records → "Nivithigala Branch"
+// Source of truth for every branch name variant seen across:
+//   Website (from types.ts BRANCHES array)  → branch.name sent in POST body
+//   Admin manual booking (BookingsPage.tsx) → shortName sent in POST body
+//   Old DB records                          → whatever was stored historically
 //
-// To add a new branch or a new variant, just add a line here.
+// All variants map to a lowercase canonical key used only for comparison.
+//
 const BRANCH_VARIANT_MAP = {
-  // ── Pannipitiya ──────────────────────────────────────────────
-  'anura tyre service pannipitiya': 'pannipitiya',
-  'anura tyres pannipitiya':        'pannipitiya',
-  'pannipitiya branch':             'pannipitiya',
-  'pannipitiya':                    'pannipitiya',
+  // ── Pannipitiya ──────────────────────────────────────────────────
+  // website sends:
+  'anura tyres (pvt) ltd pannipitiya':  'pannipitiya',
+  // admin manual sends:
+  'pannipitiya':                         'pannipitiya',
+  // old DB records:
+  'pannipitiya branch':                  'pannipitiya',
+  // any other past variants:
+  'anura tyres pannipitiya':             'pannipitiya',
+  'anura tyre service pannipitiya':      'pannipitiya',
 
-  // ── Ratnapura ────────────────────────────────────────────────
-  'anura tyre service ratnapura':   'ratnapura',
-  'anura tyres ratnapura':          'ratnapura',
-  'ratnapura branch':               'ratnapura',
-  'ratnapura':                      'ratnapura',
+  // ── Ratnapura ────────────────────────────────────────────────────
+  // website sends:
+  'anura tyres (pvt) ltd ratnapura':    'ratnapura',
+  // admin manual sends:
+  'ratnapura':                           'ratnapura',
+  // old DB records:
+  'ratnapura branch':                    'ratnapura',
+  // any other past variants:
+  'anura tyres ratnapura':               'ratnapura',
+  'anura tyre service ratnapura':        'ratnapura',
 
-  // ── Kalawana ─────────────────────────────────────────────────
-  'anura tyre service kalawana':    'kalawana',
-  'anura tyres kalawana':           'kalawana',
-  'kalawana branch':                'kalawana',
-  'kalawana':                       'kalawana',
+  // ── Kalawana ─────────────────────────────────────────────────────
+  // website sends:
+  'anura tyres pvt ltd kalawana':       'kalawana',
+  // admin manual sends:
+  'kalawana':                            'kalawana',
+  // old DB records:
+  'kalawana branch':                     'kalawana',
+  // any other past variants:
+  'anura tyres kalawana':                'kalawana',
+  'anura tyre service kalawana':         'kalawana',
 
-  // ── Nivithigala ──────────────────────────────────────────────
-  'anura tyre service nivithigala': 'nivithigala',
-  'anura tyres nivithigala':        'nivithigala',
-  'nivithigala branch':             'nivithigala',
-  'nivithigala':                    'nivithigala',
+  // ── Nivithigala ──────────────────────────────────────────────────
+  // website sends:
+  'anura tyre service nivithigala':     'nivithigala',
+  // admin manual sends:
+  'nivithigala':                         'nivithigala',
+  // old DB records:
+  'nivithigala branch':                  'nivithigala',
+  // any other past variants:
+  'anura tyres nivithigala':             'nivithigala',
+  'anura tyres (pvt) ltd nivithigala':   'nivithigala',
 };
 
-// Returns canonical key for any branch name variant.
+// Returns the canonical key for any branch name variant.
 function canonicalizeBranch(name) {
   if (!name) return '';
   return BRANCH_VARIANT_MAP[name.trim().toLowerCase()] ?? name.trim().toLowerCase();
 }
 
-// Returns ALL known DB-stored variants for a given branch name.
-// Used to build $in queries so we catch bookings stored under any variant.
+// Returns ALL known stored variants for a branch as an array for $in queries.
+// This ensures GET requests catch bookings stored under any past name format.
 function branchVariants(name) {
   const canon = canonicalizeBranch(name);
-  // Collect all map keys whose value matches the canonical key,
-  // then title-case them back to how they appear in the DB.
   const variants = Object.entries(BRANCH_VARIANT_MAP)
     .filter(([, v]) => v === canon)
     .map(([k]) =>
+      // Restore the original casing from the map key
       k.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
     );
-  // Also push the raw input itself in case it was stored verbatim
+  // Also include raw input in case it was stored verbatim and isn't in the map
   const raw = name.trim();
   if (!variants.map(v => v.toLowerCase()).includes(raw.toLowerCase())) {
     variants.push(raw);
@@ -118,22 +137,33 @@ const SERVICE_CODE_MAP = {
   'puncture repair':          'PR',
   'tyre repair (puncture)':   'PR',
   'brake service':            'BS',
+  'brakes service':           'BS',
   'suspension check':         'SC',
+  'suspension':               'SC',
   'oil change':               'OC',
   'battery service':          'BAT',
   'battery check':            'BAT',
   'battery check & replace':  'BAT',
+  'batteries':                'BAT',
   'wheel change':             'WC',
   'tyre change':              'TC',
+  'tyre sales':               'TS',
   'full service':             'FS',
   'ac service':               'AC',
+  'alloy wheels':             'AW',
   'heavy vehicle':            'HV',
   'heavy vehicle alignment':  'HV',
+  'heavy alignment':          'HV',
+  'heavy tyres':              'HT',
+  'heavy balancing':          'HB',
+  'heavy brakes':             'HBR',
+  'heavy suspension':         'HS',
   'truck tyre':               'TT',
   'truck tyre change':        'TT',
   'bus full':                 'BF',
   'bus full service':         'BF',
-  'alloy wheels':             'AW',
+  'engine tune-up':           'ET',
+  'diagnostics':              'DG',
 };
 
 function getServiceCode(serviceName) {
@@ -146,8 +176,8 @@ function getServiceCode(serviceName) {
 }
 
 // ─── BOOKING ID GENERATOR ─────────────────────────────────────────
-// Format: <SERVICE>-<BRANCH3>-<YYYYMMDD>-<MS_BASE36><RANDOM6>
-// e.g.  AW-NIV-20260424-LK8Z2QAB3X
+// Format: <SERVICE_CODES>-<BRANCH3>-<YYYYMMDD>-<MS_BASE36><RANDOM6>
+// e.g.  AW-PAN-20260424-LK8Z2QAB3X
 function generateBookingId(serviceNames, branchName, date) {
   const prefixes = [...new Set(serviceNames.map(s => getServiceCode(s)))];
   const serviceSegment = prefixes.length > 0 ? prefixes.join('-') : 'SV';
@@ -197,8 +227,8 @@ module.exports = async function handler(req, res) {
       const mustClauses = [];
 
       // ── BRANCH ACCESS CONTROL ────────────────────────────────────
-      // $in over all known variants of this branch name —
-      // catches "Anura Tyre Service Nivithigala", "Nivithigala Branch", "Nivithigala"
+      // $in over ALL known variants so bookings stored under any
+      // name format (website, manual, old records) are all returned.
       if (!user.canSeeAllBranches) {
         const variants = branchVariants(user.branch);
         mustClauses.push({ 'branch.name': { $in: variants } });
@@ -211,10 +241,10 @@ module.exports = async function handler(req, res) {
       if (search) {
         mustClauses.push({
           $or: [
-            { bookingId:            { $regex: search, $options: 'i' } },
-            { 'customer.name':      { $regex: search, $options: 'i' } },
-            { 'customer.email':     { $regex: search, $options: 'i' } },
-            { 'customer.vehicleNo': { $regex: search, $options: 'i' } },
+            { bookingId:              { $regex: search, $options: 'i' } },
+            { 'customer.name':        { $regex: search, $options: 'i' } },
+            { 'customer.email':       { $regex: search, $options: 'i' } },
+            { 'customer.vehicleNo':   { $regex: search, $options: 'i' } },
           ],
         });
       }
@@ -291,7 +321,7 @@ module.exports = async function handler(req, res) {
       }
 
       // ── AUTHORIZATION CHECK ──────────────────────────────────────
-      // Canonicalize both so "Anura Tyre Service Nivithigala" === "Nivithigala"
+      // Canonicalize both sides so "Anura Tyres (Pvt) Ltd Pannipitiya" === "Pannipitiya"
       if (
         !user.canSeeAllBranches &&
         canonicalizeBranch(body.branch.name) !== canonicalizeBranch(user.branch)
