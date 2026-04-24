@@ -27,9 +27,16 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Role, X-User-Branch');
 }
 
+// ─── BRANCH NAME NORMALIZER ──────────────────────────────────────
+// Strips " Branch" suffix so "Pannipitiya Branch" === "Pannipitiya"
+function normalizeBranchName(name) {
+  if (!name) return '';
+  return name.trim().toLowerCase().replace(/\s+branch$/i, '').trim();
+}
+
 // ─── EXTRACT & VALIDATE USER ─────────────────────────────────────
 function getUserFromHeaders(req) {
-  const role = req.headers['x-user-role']?.trim() || 'Cashier';
+  const role   = req.headers['x-user-role']?.trim()   || 'Cashier';
   const branch = req.headers['x-user-branch']?.trim() || '';
 
   const VALID_ROLES = ['Super Admin', 'Admin', 'Manager', 'Cashier'];
@@ -51,14 +58,14 @@ let adminDb = null;
 
 try {
   const { initializeApp, getApps, cert } = require('firebase-admin/app');
-  const { getFirestore } = require('firebase-admin/firestore');
+  const { getFirestore }                  = require('firebase-admin/firestore');
 
   if (!getApps().length) {
     initializeApp({
       credential: cert({
-        projectId: process.env.FIREBASE_PROJECT_ID,
+        projectId:   process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+        privateKey:  process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
       }),
     });
   }
@@ -70,11 +77,11 @@ try {
 
 // ─── Status mapping for Firestore sync ──────────────────────────
 const STATUS_MAP = {
-  'Pending': 'upcoming',
+  'Pending':     'upcoming',
   'In Progress': 'upcoming',
-  'Waiting': 'upcoming',
-  'Completed': 'completed',
-  'Cancelled': 'cancelled',
+  'Waiting':     'upcoming',
+  'Completed':   'completed',
+  'Cancelled':   'cancelled',
 };
 
 // ─── Handler ─────────────────────────────────────────────────────
@@ -90,25 +97,18 @@ module.exports = async function handler(req, res) {
     req.url?.split('/').pop()?.split('?')[0];
 
   if (!id) {
-    return res.status(400).json({
-      success: false,
-      message: 'Booking ID is required',
-    });
+    return res.status(400).json({ success: false, message: 'Booking ID is required' });
   }
 
   try {
-    // ── GET USER FROM HEADERS ────────────────────────────────────
     let user;
     try {
       user = getUserFromHeaders(req);
     } catch (err) {
-      return res.status(401).json({
-        success: false,
-        message: err.message,
-      });
+      return res.status(401).json({ success: false, message: err.message });
     }
 
-    const db = await getDb();
+    const db  = await getDb();
     const col = db.collection('bookings');
 
     // ─── GET single booking ──────────────────────────────────────
@@ -116,68 +116,53 @@ module.exports = async function handler(req, res) {
       const booking = await col.findOne({ bookingId: id });
 
       if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking not found',
-        });
+        return res.status(404).json({ success: false, message: 'Booking not found' });
       }
 
-      // ── CHECK BRANCH ACCESS ──────────────────────────────────────
-      if (!user.canSeeAllBranches && booking.branch?.name !== user.branch) {
+      // FIX: normalize both sides for comparison
+      if (
+        !user.canSeeAllBranches &&
+        normalizeBranchName(booking.branch?.name) !== normalizeBranchName(user.branch)
+      ) {
         return res.status(403).json({
           success: false,
           message: `You do not have access to bookings from ${booking.branch?.name || 'this'} branch`,
         });
       }
 
-      return res.status(200).json({
-        success: true,
-        booking,
-      });
+      return res.status(200).json({ success: true, booking });
     }
 
     // ─── PATCH update booking ────────────────────────────────────
     if (req.method === 'PATCH') {
       const { status, firebaseUid } = req.body || {};
 
-      const VALID_STATUSES = [
-        'Pending',
-        'In Progress',
-        'Completed',
-        'Cancelled',
-        'Waiting',
-      ];
+      const VALID_STATUSES = ['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'];
 
       if (status && !VALID_STATUSES.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: `Invalid status: ${status}`,
-        });
+        return res.status(400).json({ success: false, message: `Invalid status: ${status}` });
       }
 
       const booking = await col.findOne({ bookingId: id });
 
       if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: `Booking not found: ${id}`,
-        });
+        return res.status(404).json({ success: false, message: `Booking not found: ${id}` });
       }
 
-      // ── CHECK BRANCH ACCESS ─────────────────────��────────────────
-      if (!user.canSeeAllBranches && booking.branch?.name !== user.branch) {
+      // FIX: normalize both sides for comparison
+      if (
+        !user.canSeeAllBranches &&
+        normalizeBranchName(booking.branch?.name) !== normalizeBranchName(user.branch)
+      ) {
         return res.status(403).json({
           success: false,
           message: `You cannot update bookings from ${booking.branch?.name || 'this'} branch`,
         });
       }
 
-      const updateData = {
-        updatedAt: new Date(),
-      };
-
-      if (status) updateData.status = status;
-      if (firebaseUid) updateData.firebaseUid = firebaseUid;
+      const updateData = { updatedAt: new Date() };
+      if (status)      updateData.status      = status;
+      if (firebaseUid) updateData.firebaseUid  = firebaseUid;
 
       const result = await col.findOneAndUpdate(
         { bookingId: id },
@@ -188,7 +173,7 @@ module.exports = async function handler(req, res) {
       const updatedBooking = result?.value;
 
       // ─── Sync to Firestore (optional) ─────────────────────────
-      if (status && updatedBooking.firebaseUid && adminDb) {
+      if (status && updatedBooking?.firebaseUid && adminDb) {
         try {
           await adminDb
             .collection('users')
@@ -196,7 +181,7 @@ module.exports = async function handler(req, res) {
             .collection('appointments')
             .doc(updatedBooking.bookingId)
             .update({
-              status: STATUS_MAP[status] || 'upcoming',
+              status:    STATUS_MAP[status] || 'upcoming',
               updatedAt: new Date().toISOString(),
             });
         } catch (err) {
@@ -216,14 +201,14 @@ module.exports = async function handler(req, res) {
       const booking = await col.findOne({ bookingId: id });
 
       if (!booking) {
-        return res.status(404).json({
-          success: false,
-          message: 'Booking not found',
-        });
+        return res.status(404).json({ success: false, message: 'Booking not found' });
       }
 
-      // ── CHECK BRANCH ACCESS ──────────────────────────────────────
-      if (!user.canSeeAllBranches && booking.branch?.name !== user.branch) {
+      // FIX: normalize both sides for comparison
+      if (
+        !user.canSeeAllBranches &&
+        normalizeBranchName(booking.branch?.name) !== normalizeBranchName(user.branch)
+      ) {
         return res.status(403).json({
           success: false,
           message: `You cannot delete bookings from ${booking.branch?.name || 'this'} branch`,
@@ -232,24 +217,17 @@ module.exports = async function handler(req, res) {
 
       await col.findOneAndDelete({ bookingId: id });
 
-      return res.status(200).json({
-        success: true,
-        message: 'Booking deleted successfully',
-      });
+      return res.status(200).json({ success: true, message: 'Booking deleted successfully' });
     }
 
-    return res.status(405).json({
-      success: false,
-      message: 'Method not allowed',
-    });
+    return res.status(405).json({ success: false, message: 'Method not allowed' });
 
   } catch (err) {
     console.error('[id].js error:', err);
-
     return res.status(500).json({
       success: false,
       message: 'Server error',
-      error: err.message,
+      error:   err.message,
     });
   }
 };
