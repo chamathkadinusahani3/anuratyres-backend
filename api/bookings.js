@@ -27,22 +27,63 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Role, X-User-Branch');
 }
 
-// ─── BRANCH NAME NORMALIZER ──────────────────────────────────────
-// Strips " Branch" suffix and lowercases for comparison.
-// Stored docs may have "Pannipitiya" or "Pannipitiya Branch" —
-// both normalise to "pannipitiya" so matching is consistent.
-function normalizeBranchName(name) {
+// ─── CANONICAL BRANCH MAP ────────────────────────────────────────
+// Every known variant of each branch name maps to a single canonical key.
+// This solves the 3-way mismatch:
+//   Website sends  → "Anura Tyre Service Nivithigala"
+//   Manual sends   → "Nivithigala"          (shortName from BRANCHES array)
+//   Old DB records → "Nivithigala Branch"
+//
+// To add a new branch or a new variant, just add a line here.
+const BRANCH_VARIANT_MAP = {
+  // ── Pannipitiya ──────────────────────────────────────────────
+  'anura tyre service pannipitiya': 'pannipitiya',
+  'anura tyres pannipitiya':        'pannipitiya',
+  'pannipitiya branch':             'pannipitiya',
+  'pannipitiya':                    'pannipitiya',
+
+  // ── Ratnapura ────────────────────────────────────────────────
+  'anura tyre service ratnapura':   'ratnapura',
+  'anura tyres ratnapura':          'ratnapura',
+  'ratnapura branch':               'ratnapura',
+  'ratnapura':                      'ratnapura',
+
+  // ── Kalawana ─────────────────────────────────────────────────
+  'anura tyre service kalawana':    'kalawana',
+  'anura tyres kalawana':           'kalawana',
+  'kalawana branch':                'kalawana',
+  'kalawana':                       'kalawana',
+
+  // ── Nivithigala ──────────────────────────────────────────────
+  'anura tyre service nivithigala': 'nivithigala',
+  'anura tyres nivithigala':        'nivithigala',
+  'nivithigala branch':             'nivithigala',
+  'nivithigala':                    'nivithigala',
+};
+
+// Returns canonical key for any branch name variant.
+function canonicalizeBranch(name) {
   if (!name) return '';
-  return name.trim().toLowerCase().replace(/\s+branch$/i, '').trim();
+  return BRANCH_VARIANT_MAP[name.trim().toLowerCase()] ?? name.trim().toLowerCase();
 }
 
-// Build a MongoDB $or query that matches both short and full branch names.
-// e.g. user.branch = "Pannipitiya Branch" → matches "Pannipitiya" AND "Pannipitiya Branch"
-function branchQuery(branchValue) {
-  const norm = normalizeBranchName(branchValue);
-  const full  = norm.charAt(0).toUpperCase() + norm.slice(1) + ' Branch';
-  const short = norm.charAt(0).toUpperCase() + norm.slice(1);
-  return { $or: [{ 'branch.name': full }, { 'branch.name': short }] };
+// Returns ALL known DB-stored variants for a given branch name.
+// Used to build $in queries so we catch bookings stored under any variant.
+function branchVariants(name) {
+  const canon = canonicalizeBranch(name);
+  // Collect all map keys whose value matches the canonical key,
+  // then title-case them back to how they appear in the DB.
+  const variants = Object.entries(BRANCH_VARIANT_MAP)
+    .filter(([, v]) => v === canon)
+    .map(([k]) =>
+      k.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    );
+  // Also push the raw input itself in case it was stored verbatim
+  const raw = name.trim();
+  if (!variants.map(v => v.toLowerCase()).includes(raw.toLowerCase())) {
+    variants.push(raw);
+  }
+  return [...new Set(variants)];
 }
 
 // ─── EXTRACT & VALIDATE USER ─────────────────────────────────────
@@ -92,6 +133,7 @@ const SERVICE_CODE_MAP = {
   'truck tyre change':        'TT',
   'bus full':                 'BF',
   'bus full service':         'BF',
+  'alloy wheels':             'AW',
 };
 
 function getServiceCode(serviceName) {
@@ -104,19 +146,14 @@ function getServiceCode(serviceName) {
 }
 
 // ─── BOOKING ID GENERATOR ─────────────────────────────────────────
-// Format: <SERVICE_CODES>-<BRANCH>-<YYYYMMDD>-<MS_BASE36><RANDOM6>
-// e.g.  WB-AL-PAN-20250424-1k7z2qAB3X
-// Using millisecond timestamp (base-36) + 6 random chars gives
-// ~2.8 trillion unique values per day — collision-proof in practice.
+// Format: <SERVICE>-<BRANCH3>-<YYYYMMDD>-<MS_BASE36><RANDOM6>
+// e.g.  AW-NIV-20260424-LK8Z2QAB3X
 function generateBookingId(serviceNames, branchName, date) {
   const prefixes = [...new Set(serviceNames.map(s => getServiceCode(s)))];
   const serviceSegment = prefixes.length > 0 ? prefixes.join('-') : 'SV';
 
-  // Use first 3 letters of the first significant word in the branch name
-  const branchSegment = normalizeBranchName(branchName)
-    .replace(/[^a-z]/g, '')
-    .slice(0, 3)
-    .toUpperCase() || 'HQ';
+  const canon = canonicalizeBranch(branchName);
+  const branchSegment = canon.replace(/[^a-z]/g, '').slice(0, 3).toUpperCase() || 'HQ';
 
   const d = new Date(date);
   const dateSegment =
@@ -124,10 +161,8 @@ function generateBookingId(serviceNames, branchName, date) {
     String(d.getMonth() + 1).padStart(2, '0') +
     String(d.getDate()).padStart(2, '0');
 
-  // Millisecond timestamp in base-36 (6-7 chars, monotonically increasing)
   const tsSegment = Date.now().toString(36).toUpperCase();
 
-  // 6 additional random chars for extra entropy
   const CHARS  = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const random = Array.from({ length: 6 }, () =>
     CHARS[Math.floor(Math.random() * CHARS.length)]
@@ -159,33 +194,39 @@ module.exports = async function handler(req, res) {
 
       const { status, search, date, limit = 50 } = req.query;
 
-      const query = {};
+      const mustClauses = [];
 
       // ── BRANCH ACCESS CONTROL ────────────────────────────────────
-      // FIX: use $or to match both "Pannipitiya" and "Pannipitiya Branch"
+      // $in over all known variants of this branch name —
+      // catches "Anura Tyre Service Nivithigala", "Nivithigala Branch", "Nivithigala"
       if (!user.canSeeAllBranches) {
-        Object.assign(query, branchQuery(user.branch));
+        const variants = branchVariants(user.branch);
+        mustClauses.push({ 'branch.name': { $in: variants } });
       }
 
       if (status && status !== 'all') {
-        query.status = status;
+        mustClauses.push({ status });
       }
 
       if (search) {
-        query.$or = [
-          { bookingId:          { $regex: search, $options: 'i' } },
-          { 'customer.name':    { $regex: search, $options: 'i' } },
-          { 'customer.email':   { $regex: search, $options: 'i' } },
-          { 'customer.vehicleNo': { $regex: search, $options: 'i' } },
-        ];
+        mustClauses.push({
+          $or: [
+            { bookingId:            { $regex: search, $options: 'i' } },
+            { 'customer.name':      { $regex: search, $options: 'i' } },
+            { 'customer.email':     { $regex: search, $options: 'i' } },
+            { 'customer.vehicleNo': { $regex: search, $options: 'i' } },
+          ],
+        });
       }
 
       if (date) {
         const start = new Date(`${date}T00:00:00.000Z`);
         start.setMinutes(start.getMinutes() - 330);
         const end = new Date(`${date}T23:59:59.999Z`);
-        query.date = { $gte: start, $lte: end };
+        mustClauses.push({ date: { $gte: start, $lte: end } });
       }
+
+      const query = mustClauses.length > 0 ? { $and: mustClauses } : {};
 
       const bookings = await col
         .find(query)
@@ -204,7 +245,7 @@ module.exports = async function handler(req, res) {
                 return d.toISOString().split('T')[0];
               })()
             : '',
-          customer: b.customer?.name  || '',
+          customer: b.customer?.name      || '',
           vehicle:  b.customer?.vehicleNo || 'N/A',
           service:  Array.isArray(b.services) ? b.services.map(s => s.name).join(', ') : '',
           status:   b.status,
@@ -236,14 +277,12 @@ module.exports = async function handler(req, res) {
           message: 'Customer name, email and phone are required',
         });
       }
-
       if (!body.date || !body.timeSlot) {
         return res.status(400).json({
           success: false,
           message: 'Date and time slot are required',
         });
       }
-
       if (!body.branch || !body.branch.name) {
         return res.status(400).json({
           success: false,
@@ -252,10 +291,10 @@ module.exports = async function handler(req, res) {
       }
 
       // ── AUTHORIZATION CHECK ──────────────────────────────────────
-      // FIX: normalize both sides before comparing so "Pannipitiya" === "Pannipitiya Branch"
+      // Canonicalize both so "Anura Tyre Service Nivithigala" === "Nivithigala"
       if (
         !user.canSeeAllBranches &&
-        normalizeBranchName(body.branch.name) !== normalizeBranchName(user.branch)
+        canonicalizeBranch(body.branch.name) !== canonicalizeBranch(user.branch)
       ) {
         return res.status(403).json({
           success: false,
@@ -263,18 +302,15 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      // ── GENERATE BOOKING ID ──────────────────────────────────────
-      // Always generate on the backend — never trust a client-supplied ID
       const serviceNames = Array.isArray(body.services)
         ? body.services.map(s => s.name)
         : [];
       const bookingId = generateBookingId(serviceNames, body.branch.name, body.date);
 
       // ── DUPLICATE GUARD ──────────────────────────────────────────
-      // With the stronger ID this should be extremely rare, but keep the guard
       const existing = await col.findOne({ bookingId });
       if (existing) {
-        console.warn(`Duplicate bookingId generated (extremely rare): ${bookingId}`);
+        console.warn(`Duplicate bookingId generated: ${bookingId}`);
         return res.status(200).json({
           success:   true,
           message:   'Booking already exists',
@@ -299,8 +335,8 @@ module.exports = async function handler(req, res) {
           discountInfo: body.discountInfo,
           discountCode: body.discountCode || '',
         } : {}),
-        createdAt:   new Date(),
-        updatedAt:   new Date(),
+        createdAt: new Date(),
+        updatedAt: new Date(),
       };
 
       await col.insertOne(doc);

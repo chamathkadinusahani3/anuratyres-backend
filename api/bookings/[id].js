@@ -27,11 +27,34 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-User-Role, X-User-Branch');
 }
 
-// ─── BRANCH NAME NORMALIZER ──────────────────────────────────────
-// Strips " Branch" suffix so "Pannipitiya Branch" === "Pannipitiya"
-function normalizeBranchName(name) {
+// ─── CANONICAL BRANCH MAP ────────────────────────────────────────
+// Same map as bookings.js — kept in sync manually.
+// Every known variant → canonical key.
+const BRANCH_VARIANT_MAP = {
+  'anura tyre service pannipitiya': 'pannipitiya',
+  'anura tyres pannipitiya':        'pannipitiya',
+  'pannipitiya branch':             'pannipitiya',
+  'pannipitiya':                    'pannipitiya',
+
+  'anura tyre service ratnapura':   'ratnapura',
+  'anura tyres ratnapura':          'ratnapura',
+  'ratnapura branch':               'ratnapura',
+  'ratnapura':                      'ratnapura',
+
+  'anura tyre service kalawana':    'kalawana',
+  'anura tyres kalawana':           'kalawana',
+  'kalawana branch':                'kalawana',
+  'kalawana':                       'kalawana',
+
+  'anura tyre service nivithigala': 'nivithigala',
+  'anura tyres nivithigala':        'nivithigala',
+  'nivithigala branch':             'nivithigala',
+  'nivithigala':                    'nivithigala',
+};
+
+function canonicalizeBranch(name) {
   if (!name) return '';
-  return name.trim().toLowerCase().replace(/\s+branch$/i, '').trim();
+  return BRANCH_VARIANT_MAP[name.trim().toLowerCase()] ?? name.trim().toLowerCase();
 }
 
 // ─── EXTRACT & VALIDATE USER ─────────────────────────────────────
@@ -75,7 +98,7 @@ try {
   console.warn('Firebase Admin not initialized:', err.message);
 }
 
-// ─── Status mapping for Firestore sync ──────────────────────────
+// ─── Status mapping for Firestore sync ───────────────────────────
 const STATUS_MAP = {
   'Pending':     'upcoming',
   'In Progress': 'upcoming',
@@ -119,10 +142,10 @@ module.exports = async function handler(req, res) {
         return res.status(404).json({ success: false, message: 'Booking not found' });
       }
 
-      // FIX: normalize both sides for comparison
+      // Canonicalize both sides — handles all branch name variants
       if (
         !user.canSeeAllBranches &&
-        normalizeBranchName(booking.branch?.name) !== normalizeBranchName(user.branch)
+        canonicalizeBranch(booking.branch?.name) !== canonicalizeBranch(user.branch)
       ) {
         return res.status(403).json({
           success: false,
@@ -149,10 +172,10 @@ module.exports = async function handler(req, res) {
         return res.status(404).json({ success: false, message: `Booking not found: ${id}` });
       }
 
-      // FIX: normalize both sides for comparison
+      // Canonicalize both sides — handles all branch name variants
       if (
         !user.canSeeAllBranches &&
-        normalizeBranchName(booking.branch?.name) !== normalizeBranchName(user.branch)
+        canonicalizeBranch(booking.branch?.name) !== canonicalizeBranch(user.branch)
       ) {
         return res.status(403).json({
           success: false,
@@ -161,8 +184,8 @@ module.exports = async function handler(req, res) {
       }
 
       const updateData = { updatedAt: new Date() };
-      if (status)      updateData.status      = status;
-      if (firebaseUid) updateData.firebaseUid  = firebaseUid;
+      if (status)      updateData.status     = status;
+      if (firebaseUid) updateData.firebaseUid = firebaseUid;
 
       const result = await col.findOneAndUpdate(
         { bookingId: id },
@@ -196,7 +219,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ─── DELETE booking ─────────────────────────────────────────
+    // ─── DELETE booking ──────────────────────────────────────────
     if (req.method === 'DELETE') {
       const booking = await col.findOne({ bookingId: id });
 
@@ -204,10 +227,10 @@ module.exports = async function handler(req, res) {
         return res.status(404).json({ success: false, message: 'Booking not found' });
       }
 
-      // FIX: normalize both sides for comparison
+      // Canonicalize both sides — handles all branch name variants
       if (
         !user.canSeeAllBranches &&
-        normalizeBranchName(booking.branch?.name) !== normalizeBranchName(user.branch)
+        canonicalizeBranch(booking.branch?.name) !== canonicalizeBranch(user.branch)
       ) {
         return res.status(403).json({
           success: false,
