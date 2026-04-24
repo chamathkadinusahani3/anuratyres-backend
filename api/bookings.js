@@ -39,6 +39,8 @@ const BRANCH_VARIANT_MAP = {
   // ── Pannipitiya ──────────────────────────────────────────────────
   // website sends:
   'anura tyres (pvt) ltd pannipitiya':  'pannipitiya',
+
+  'anura tyres pvt ltd pannipitiya':  'pannipitiya',
   // admin manual sends:
   'pannipitiya':                         'pannipitiya',
   // old DB records:
@@ -50,6 +52,8 @@ const BRANCH_VARIANT_MAP = {
   // ── Ratnapura ────────────────────────────────────────────────────
   // website sends:
   'anura tyres (pvt) ltd ratnapura':    'ratnapura',
+
+  'anura tyres pvt ltd ratnapura':    'ratnapura',
   // admin manual sends:
   'ratnapura':                           'ratnapura',
   // old DB records:
