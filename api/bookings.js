@@ -175,97 +175,99 @@ module.exports = async function handler(req, res) {
     }
 
     // ─── CREATE BOOKING ──────────────────────────────────────────
-    // ─── CREATE BOOKING ──────────────────────────────────────────
-if (req.method === 'POST') {
-  let user;
-  try {
-    user = getUserFromHeaders(req);
-  } catch (err) {
-    return res.status(401).json({
+    if (req.method === 'POST') {
+      let user;
+      try {
+        user = getUserFromHeaders(req);
+      } catch (err) {
+        return res.status(401).json({
+          success: false,
+          message: err.message,
+        });
+      }
+
+      const body = req.body;
+
+      if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
+        return res.status(400).json({
+          success: false,
+          message: 'Customer name, email and phone are required',
+        });
+      }
+
+      if (!body.date || !body.timeSlot) {
+        return res.status(400).json({
+          success: false,
+          message: 'Date and time slot are required',
+        });
+      }
+
+      if (!body.branch || !body.branch.name) {
+        return res.status(400).json({
+          success: false,
+          message: 'Branch information is required',
+        });
+      }
+
+      // ── AUTHORIZATION CHECK ──────────────────────────────────────
+      if (!user.canSeeAllBranches && body.branch.name !== user.branch) {
+        return res.status(403).json({
+          success: false,
+          message: `You can only create bookings for ${user.branch} branch`,
+        });
+      }
+
+      // ── GENERATE BOOKING ID (if not provided) ───────────────────
+      let bookingId = body.bookingId;
+      
+      if (!bookingId) {
+        const serviceNames = Array.isArray(body.services)
+          ? body.services.map(s => s.name)
+          : [];
+        bookingId = generateBookingId(serviceNames, body.branch.name, body.date);
+      }
+
+      // ── DUPLICATE GUARD ──────────────────────────────────────────
+      const existing = await col.findOne({ bookingId });
+      if (existing) {
+        console.warn(`Duplicate POST blocked for bookingId: ${bookingId}`);
+        return res.status(200).json({
+          success: true,
+          message: 'Booking already exists',
+          booking: { bookingId },
+          duplicate: true,
+        });
+      }
+
+      const doc = {
+        bookingId,
+        firebaseUid: body.firebaseUid || null,
+        branch: body.branch,
+        category: body.category || '',
+        services: Array.isArray(body.services) ? body.services : [],
+        date: new Date(body.date),
+        timeSlot: body.timeSlot,
+        customer: body.customer,
+        status: 'Pending',
+        amount: body.amount || '0',
+        source: body.source || 'website',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      await col.insertOne(doc);
+
+      return res.status(201).json({
+        success: true,
+        message: 'Booking created successfully',
+        booking: { bookingId },
+      });
+    }
+
+    return res.status(405).json({
       success: false,
-      message: err.message,
+      message: 'Method not allowed',
     });
-  }
-
-  const body = req.body;
-
-  if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
-    return res.status(400).json({
-      success: false,
-      message: 'Customer name, email and phone are required',
-    });
-  }
-
-  if (!body.date || !body.timeSlot) {
-    return res.status(400).json({
-      success: false,
-      message: 'Date and time slot are required',
-    });
-  }
-
-  if (!body.branch || !body.branch.name) {
-    return res.status(400).json({
-      success: false,
-      message: 'Branch information is required',
-    });
-  }
-
-  // ── AUTHORIZATION CHECK ──────────────────────────────────────
-  if (!user.canSeeAllBranches && body.branch.name !== user.branch) {
-    return res.status(403).json({
-      success: false,
-      message: `You can only create bookings for ${user.branch} branch`,
-    });
-  }
-
-  // ── GENERATE BOOKING ID (ONLY if not provided) ──────────────
-  // If frontend provides bookingId, use it; otherwise generate one
-  let bookingId = body.bookingId;
-  
-  if (!bookingId) {
-    // Generate using the same logic
-    const serviceNames = Array.isArray(body.services)
-      ? body.services.map(s => s.name)
-      : [];
-    bookingId = generateBookingId(serviceNames, body.branch.name, body.date);
-  }
-
-  // ── DUPLICATE GUARD ──────────────────────────────────────────
-  const existing = await col.findOne({ bookingId });
-  if (existing) {
-    console.warn(`Duplicate POST blocked for bookingId: ${bookingId}`);
-    return res.status(200).json({
-      success: true,
-      message: 'Booking already exists',
-      booking: { bookingId },
-      duplicate: true,
-    });
-  }
-
-  const doc = {
-    bookingId,
-    firebaseUid: body.firebaseUid || null,
-    branch: body.branch,
-    category: body.category || '',
-    services: Array.isArray(body.services) ? body.services : [],
-    date: new Date(body.date),
-    timeSlot: body.timeSlot,
-    customer: body.customer,
-    status: 'Pending',
-    amount: body.amount || '0',
-    source: body.source || 'website',
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  };
-
-  await col.insertOne(doc);
-
-  return res.status(201).json({
-    success: true,
-    message: 'Booking created successfully',
-    booking: { bookingId },  // ← Return the bookingId
-  });
-}
 
   } catch (err) {
     console.error('bookings.js error:', err);
