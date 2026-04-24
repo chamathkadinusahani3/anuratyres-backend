@@ -45,23 +45,20 @@ async function syncBookingsToJobs(db, branch, dateStr) {
   const dayEnd   = new Date(`${dateStr}T23:59:59.999Z`);
   const branchRegex = new RegExp(branch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 
-  // Match bookings for this branch+date
-  // Some bookings may have no branch.name (saved with undefined) — catch those too
   const bookings = await db.collection('bookings').find({
     $or: [
-      { 'branch.name': { $regex: branchRegex } },  // website: full name contains branch
-      { 'branch.name': null },                       // admin manual: branch.name was undefined
-      { 'branch.name': { $exists: false } },         // completely missing
-      { branch: null },                              // branch field itself is null
+      { 'branch.name': { $regex: branchRegex } },
+      { 'branch.name': null },
+      { 'branch.name': { $exists: false } },
+      { branch: null },
     ],
     date:   { $gte: dayStart, $lte: dayEnd },
     status: { $nin: ['Cancelled', 'Completed'] },
   }).toArray();
 
-  // Filter out bookings that belong to a DIFFERENT branch (have a name but wrong one)
   const filtered = bookings.filter(b => {
     const bName = b.branch?.name;
-    if (!bName) return true; // no branch name — assume belongs to current branch
+    if (!bName) return true;
     return branchRegex.test(bName);
   });
 
@@ -105,7 +102,99 @@ module.exports = async function handler(req, res) {
     const jobsCol   = db.collection('job_assignments');
     const timersCol = db.collection('job_timers');
     const logsCol   = db.collection('job_stop_logs');
+    
     const { resource, id, branch, date } = req.query;
+    
+    // Extract path to detect /api/jobs/stop
+    const pathSegments = req.url.split('?')[0].split('/').filter(Boolean);
+    const lastSegment = pathSegments[pathSegments.length - 1];
+
+    // ── STOP JOB WITH REASON ───────────────────────────────────────────────
+    if (lastSegment === 'stop' || resource === 'jobs/stop') {
+      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+      
+      const { vehiclePlate, reason } = req.body;
+      if (!vehiclePlate || !reason) {
+        return res.status(400).json({ error: 'vehiclePlate and reason required' });
+      }
+
+      const validReasons = ['COMPLETED', 'TERMINATED', 'STOCK_ISSUE', 'PRICE_DISAGREE'];
+      if (!validReasons.includes(reason)) {
+        return res.status(400).json({ error: `Invalid reason. Must be one of: ${validReasons.join(', ')}` });
+      }
+
+      const now = new Date();
+
+      // Find all active jobs for this vehicle plate
+      const jobs = await jobsCol.find({
+        vehiclePlate,
+        status: { $in: ['in_progress', 'paused'] }
+      }).toArray();
+
+      if (jobs.length === 0) {
+        return res.status(404).json({ error: 'No active job found for this vehicle plate' });
+      }
+
+      const stoppedJobs = [];
+      for (const job of jobs) {
+        const jid = job._id;
+        const timer = await timersCol.findOne({ jobId: jid });
+        
+        if (timer && !timer.stoppedAt) {
+          const totalElapsedSecs = Math.floor((now - new Date(timer.startedAt)) / 1000);
+          let totalPausedSecs = 0;
+          for (const p of timer.pauseLogs) {
+            if (p.resumedAt) {
+              totalPausedSecs += Math.floor((new Date(p.resumedAt) - new Date(p.pausedAt)) / 1000);
+            }
+          }
+          const activeWorkSecs = totalElapsedSecs - totalPausedSecs;
+          const allocatedSecs  = (job.allocatedMins || 30) * 60;
+          const isOvertime     = activeWorkSecs > allocatedSecs;
+          const overtimeSecs   = isOvertime ? activeWorkSecs - allocatedSecs : 0;
+
+          await timersCol.updateOne({ jobId: jid },
+            { $set: { 
+              stoppedAt: now, 
+              totalElapsedSecs, 
+              totalPausedSecs, 
+              activeWorkSecs, 
+              isOvertime, 
+              overtimeSecs,
+              stoppedReason: reason 
+            } });
+        }
+
+        // Update job status to done
+        await jobsCol.updateOne({ _id: jid }, { $set: { status: 'done', updatedAt: now } });
+
+        // Log the stop event
+        await logsCol.insertOne({
+          jobId: jid.toString(),
+          vehiclePlate,
+          service: job.service,
+          reason,
+          stoppedAt: now,
+          stoppedBy: 'lobby_display',
+          allocatedMins: job.allocatedMins,
+          staffId: job.staffId?.toString() || null,
+          branch: job.branch,
+          date: job.date,
+        });
+
+        stoppedJobs.push({
+          jobId: jid.toString(),
+          service: job.service,
+          reason
+        });
+      }
+
+      return res.status(200).json({
+        ok: true,
+        message: `Job stopped for ${vehiclePlate} with reason: ${reason}`,
+        stoppedJobs
+      });
+    }
 
     // ── FORCE SYNC — POST ?resource=sync&branch=X&date=Y ─────────────────────────
     if (resource === 'sync') {
@@ -227,98 +316,6 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({
         branch, date, generatedAt: new Date(),
         totalJobsDone: jobs.length, totalStaffWorked: report.length, staff: report,
-      });
-    }
-
-    // ── STOP JOB WITH REASON ───────────────────────────────────────────────────
-    if (resource === 'jobs/stop' || req.url?.includes('/api/jobs/stop')) {
-      if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      
-      const { vehiclePlate, reason } = req.body;
-      if (!vehiclePlate || !reason) {
-        return res.status(400).json({ error: 'vehiclePlate and reason required' });
-      }
-
-      const validReasons = ['COMPLETED', 'TERMINATED', 'STOCK_ISSUE', 'PRICE_DISAGREE'];
-      if (!validReasons.includes(reason)) {
-        return res.status(400).json({ error: `Invalid reason. Must be one of: ${validReasons.join(', ')}` });
-      }
-
-      const now = new Date();
-
-      // Find the job(s) for this vehicle plate that are in progress or paused
-      const jobs = await jobsCol.find({
-        vehiclePlate,
-        status: { $in: ['in_progress', 'paused'] }
-      }).toArray();
-
-      if (jobs.length === 0) {
-        return res.status(404).json({ error: 'No active job found for this vehicle plate' });
-      }
-
-      // Stop all active jobs for this vehicle
-      const stoppedJobs = [];
-      for (const job of jobs) {
-        const jid = job._id;
-        
-        // Get the timer
-        const timer = await timersCol.findOne({ jobId: jid });
-        
-        if (timer && !timer.stoppedAt) {
-          // Calculate elapsed and paused time
-          const totalElapsedSecs = Math.floor((now - new Date(timer.startedAt)) / 1000);
-          let totalPausedSecs = 0;
-          for (const p of timer.pauseLogs) {
-            if (p.resumedAt) {
-              totalPausedSecs += Math.floor((new Date(p.resumedAt) - new Date(p.pausedAt)) / 1000);
-            }
-          }
-          const activeWorkSecs = totalElapsedSecs - totalPausedSecs;
-          const allocatedSecs  = (job.allocatedMins || 30) * 60;
-          const isOvertime     = activeWorkSecs > allocatedSecs;
-          const overtimeSecs   = isOvertime ? activeWorkSecs - allocatedSecs : 0;
-
-          // Update timer
-          await timersCol.updateOne({ jobId: jid },
-            { $set: { 
-              stoppedAt: now, 
-              totalElapsedSecs, 
-              totalPausedSecs, 
-              activeWorkSecs, 
-              isOvertime, 
-              overtimeSecs,
-              stoppedReason: reason 
-            } });
-        }
-
-        // Update job status to done
-        await jobsCol.updateOne({ _id: jid }, { $set: { status: 'done', updatedAt: now } });
-
-        // Log the stop event
-        await logsCol.insertOne({
-          jobId: jid.toString(),
-          vehiclePlate,
-          service: job.service,
-          reason,
-          stoppedAt: now,
-          stoppedBy: 'lobby_display', // Can be updated to track who stopped it
-          allocatedMins: job.allocatedMins,
-          staffId: job.staffId?.toString() || null,
-          branch: job.branch,
-          date: job.date,
-        });
-
-        stoppedJobs.push({
-          jobId: jid.toString(),
-          service: job.service,
-          reason
-        });
-      }
-
-      return res.status(200).json({
-        ok: true,
-        message: `Job stopped for ${vehiclePlate} with reason: ${reason}`,
-        stoppedJobs
       });
     }
 
