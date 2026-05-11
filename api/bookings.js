@@ -382,6 +382,144 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ─── PATCH /:id  — status update ────────────────────────────
+    // Handles:  PATCH /api/bookings/:id          { status }
+    // Handles:  PATCH /api/bookings/:id/late-alert  { minutesLate }
+    if (req.method === 'PATCH' || (req.method === 'POST' && (req.url || '').includes('late-alert'))) {
+      let user;
+      try {
+        user = getUserFromHeaders(req);
+      } catch (err) {
+        return res.status(401).json({ success: false, message: err.message });
+      }
+
+      // ── Parse the URL to get booking id and optional sub-action ──
+      // Vercel routes everything through this file; the full path is
+      // available on req.url, e.g. "/api/bookings/WB-PAN-20260511-ABC/late-alert"
+      const urlParts  = (req.url || '').replace(/^\/api\/bookings\/?/, '').split('/');
+      const bookingId = decodeURIComponent(urlParts[0] || '');
+      const subAction = urlParts[1] || '';   // 'late-alert' or ''
+
+      if (!bookingId) {
+        return res.status(400).json({ success: false, message: 'Booking ID required' });
+      }
+
+      const booking = await col.findOne({ bookingId });
+      if (!booking) {
+        return res.status(404).json({ success: false, message: 'Booking not found' });
+      }
+
+      // ── Branch access guard ───────────────────────────────────────
+      if (!user.canSeeAllBranches) {
+        const variants = branchVariants(user.branch);
+        const branchName = booking.branch?.name || '';
+        const allowed = variants.some(
+          v => v.toLowerCase() === branchName.toLowerCase()
+        );
+        if (!allowed) {
+          return res.status(403).json({ success: false, message: 'Access denied for this branch' });
+        }
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // SUB-ACTION: late-alert  (POST body: { minutesLate: 10|30 })
+      // ════════════════════════════════════════════════════════════
+      if (subAction === 'late-alert') {
+        const minutesLate = parseInt(req.body?.minutesLate ?? 10, 10);
+
+        if (booking.status === 'Cancelled') {
+          return res.json({ ok: true, skipped: true, reason: 'Already cancelled' });
+        }
+
+        // ── Build SMS message ──────────────────────────────────────
+        const customerName = booking.customer?.name   || 'Customer';
+        const serviceName  = Array.isArray(booking.services)
+          ? booking.services.map(s => s.name).join(' & ')
+          : 'your service';
+        const timeSlot     = booking.timeSlot || '';
+
+        // Resolve clean branch short name from the BRANCH_VARIANT_MAP
+        const canonBranch = canonicalizeBranch(booking.branch?.name || '');
+        const branchShort = canonBranch.charAt(0).toUpperCase() + canonBranch.slice(1);
+
+        // Use branch phone from a lookup table (mirrors frontend BRANCHES array)
+        const BRANCH_PHONES = {
+          pannipitiya: '077 578 5785',
+          ratnapura:   '076 688 5885',
+          kalawana:    '0777 32 95 32',
+          nivithigala: '045 227 9396',
+        };
+        const branchPhone = BRANCH_PHONES[canonBranch] || '';
+
+        const smsBody = minutesLate >= 30
+          ? `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} was cancelled (no-show). Call ${branchPhone} to rebook. - Anura Tyres ${branchShort}`
+          : `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} hasn't started. Please arrive at Anura Tyres ${branchShort} ASAP or call ${branchPhone}.`;
+
+        // ── Normalise phone to 94XXXXXXXXX ─────────────────────────
+        let rawPhone = booking.customer?.phone || '';
+        let phone = rawPhone.replace(/[\s\-]/g, '');
+        if (phone.startsWith('+'))  phone = phone.slice(1);
+        if (phone.startsWith('0'))  phone = '94' + phone.slice(1);
+        if (!phone.startsWith('94')) phone = '94' + phone;
+
+        // ── Send via notify.lk ─────────────────────────────────────
+        let smsSent = false;
+        const userId   = process.env.NOTIFY_USER_ID;
+        const apiKey   = process.env.NOTIFY_API_KEY;
+        const senderId = process.env.NOTIFY_SENDER_ID || 'NotifyDEMO';
+
+        if (userId && apiKey && phone.length >= 11) {
+          try {
+            const params = new URLSearchParams({
+              user_id:   userId,
+              api_key:   apiKey,
+              sender_id: senderId,
+              to:        phone,
+              message:   smsBody,
+            });
+            const smsRes  = await fetch(`https://app.notify.lk/api/v1/send?${params}`, { method: 'GET' });
+            const smsBody2 = await smsRes.json().catch(() => ({}));
+            console.log('[late-alert] notify.lk response:', smsBody2);
+            smsSent = smsBody2.status === 'success';
+            if (!smsSent) console.warn('[late-alert] SMS failed:', smsBody2);
+          } catch (smsErr) {
+            console.error('[late-alert] SMS error:', smsErr.message);
+          }
+        } else {
+          console.warn('[late-alert] Skipping SMS — missing env vars or invalid phone:', phone);
+        }
+
+        // ── Auto-cancel at 30 min ──────────────────────────────────
+        let autoCancelled = false;
+        if (minutesLate >= 30 && booking.status !== 'Cancelled') {
+          await col.updateOne(
+            { bookingId },
+            { $set: { status: 'Cancelled', updatedAt: new Date() } }
+          );
+          autoCancelled = true;
+          console.log(`[late-alert] Auto-cancelled booking ${bookingId}`);
+        }
+
+        return res.json({ ok: true, smsSent, autoCancelled });
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // DEFAULT PATCH: status update  { status: 'In Progress' | ... }
+      // ════════════════════════════════════════════════════════════
+      const { status } = req.body || {};
+      const VALID_STATUSES = ['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'];
+      if (!status || !VALID_STATUSES.includes(status)) {
+        return res.status(400).json({ success: false, message: `Invalid status: ${status}` });
+      }
+
+      await col.updateOne(
+        { bookingId },
+        { $set: { status, updatedAt: new Date() } }
+      );
+
+      return res.json({ success: true, message: 'Status updated', bookingId, status });
+    }
+
     return res.status(405).json({ success: false, message: 'Method not allowed' });
 
   } catch (err) {
