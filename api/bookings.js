@@ -503,7 +503,7 @@ module.exports = async function handler(req, res) {
         return res.json({ ok: true, smsSent, autoCancelled });
       }
 
-      // ════════════════════════════════════════════════════════════
+      // ══════════════════════════════════════════════════════════
       // DEFAULT PATCH: status update  { status: 'In Progress' | ... }
       // ════════════════════════════════════════════════════════════
       const { status } = req.body || {};
