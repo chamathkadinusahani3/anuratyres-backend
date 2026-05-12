@@ -294,7 +294,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ─── CREATE BOOKING ──────────────────────────────────────────
+    // ─── ALL POST REQUESTS ───────────────────────────────────────
     if (req.method === 'POST') {
       let user;
       try {
@@ -305,6 +305,81 @@ module.exports = async function handler(req, res) {
 
       const body = req.body;
 
+      // ── LATE ALERT (must be checked before create booking) ───────
+      if (body?.action === 'late-alert') {
+        const { bookingId, minutesLate = 10 } = body;
+
+        if (!bookingId) return res.status(400).json({ success: false, message: 'bookingId required' });
+
+        const booking = await col.findOne({ bookingId });
+        if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
+
+        if (booking.status === 'Cancelled')
+          return res.json({ ok: true, skipped: true, reason: 'Already cancelled' });
+
+        const customerName = booking.customer?.name || 'Customer';
+        const serviceName  = Array.isArray(booking.services)
+          ? booking.services.map(s => s.name).join(' & ')
+          : 'your service';
+        const timeSlot = booking.timeSlot || '';
+
+        const canonBranch = canonicalizeBranch(booking.branch?.name || '');
+        const branchShort = canonBranch.charAt(0).toUpperCase() + canonBranch.slice(1);
+        const BRANCH_PHONES = {
+          pannipitiya: '077 578 5785',
+          ratnapura:   '076 688 5885',
+          kalawana:    '0777 32 95 32',
+          nivithigala: '045 227 9396',
+        };
+        const branchPhone = BRANCH_PHONES[canonBranch] || '';
+
+        const smsMessage = minutesLate >= 30
+          ? `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} was cancelled (no-show). Call ${branchPhone} to rebook. - Anura Tyres ${branchShort}`
+          : `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} hasn't started. Please arrive at Anura Tyres ${branchShort} ASAP or call ${branchPhone}.`;
+
+        let rawPhone = booking.customer?.phone || '';
+        let phone = rawPhone.replace(/[\s-]/g, '');
+        if (phone.startsWith('+'))   phone = phone.slice(1);
+        if (phone.startsWith('0'))   phone = '94' + phone.slice(1);
+        if (!phone.startsWith('94')) phone = '94' + phone;
+
+        let smsSent = false;
+        const userId   = process.env.NOTIFY_USER_ID;
+        const apiKey   = process.env.NOTIFY_API_KEY;
+        const senderId = process.env.NOTIFY_SENDER_ID || 'NotifyDEMO';
+
+        console.log('[late-alert] ENV userId:', !!userId, '| apiKey:', !!apiKey, '| senderId:', senderId);
+        console.log('[late-alert] phone:', phone, '| length:', phone.length);
+        console.log('[late-alert] message:', smsMessage);
+
+        if (userId && apiKey && phone.length >= 11) {
+          try {
+            const params = new URLSearchParams({
+              user_id: userId, api_key: apiKey,
+              sender_id: senderId, to: phone, message: smsMessage,
+            });
+            const smsRes  = await fetch(`https://app.notify.lk/api/v1/send?${params}`, { method: 'GET' });
+            const smsData = await smsRes.json().catch(() => ({}));
+            console.log('[late-alert] notify.lk HTTP:', smsRes.status, '| body:', JSON.stringify(smsData));
+            smsSent = smsData.status === 'success';
+          } catch (smsErr) {
+            console.error('[late-alert] fetch error:', smsErr.message);
+          }
+        } else {
+          console.warn('[late-alert] skipping SMS — phone:', phone, '| userId:', !!userId, '| apiKey:', !!apiKey);
+        }
+
+        let autoCancelled = false;
+        if (minutesLate >= 30) {
+          await col.updateOne({ bookingId }, { $set: { status: 'Cancelled', updatedAt: new Date() } });
+          autoCancelled = true;
+          console.log('[late-alert] auto-cancelled:', bookingId);
+        }
+
+        return res.json({ ok: true, smsSent, autoCancelled });
+      }
+
+      // ─── CREATE BOOKING ────────────────────────────────────────
       if (!body.customer?.name || !body.customer?.email || !body.customer?.phone) {
         return res.status(400).json({
           success: false,
@@ -380,118 +455,6 @@ module.exports = async function handler(req, res) {
         message: 'Booking created successfully',
         booking: { bookingId },
       });
-    }
-
-    // ─── PATCH /api/bookings/:id  — status update ───────────────────
-    // Frontend sends:  PATCH /api/bookings/<bookingId>   { status }
-    // On Vercel, req.url is just "/" so we read the id from the body.
-    // The frontend must include bookingId in the body for PATCH requests.
-    if (req.method === 'PATCH') {
-      let user;
-      try { user = getUserFromHeaders(req); }
-      catch (err) { return res.status(401).json({ success: false, message: err.message }); }
-
-      const { bookingId, status } = req.body || {};
-
-      if (!bookingId) return res.status(400).json({ success: false, message: 'bookingId required in body' });
-
-      const booking = await col.findOne({ bookingId });
-      if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-
-      if (!user.canSeeAllBranches) {
-        const variants = branchVariants(user.branch);
-        const allowed = variants.some(v => v.toLowerCase() === (booking.branch?.name || '').toLowerCase());
-        if (!allowed) return res.status(403).json({ success: false, message: 'Access denied for this branch' });
-      }
-
-      const VALID_STATUSES = ['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'];
-      if (!status || !VALID_STATUSES.includes(status))
-        return res.status(400).json({ success: false, message: `Invalid status: ${status}` });
-
-      await col.updateOne({ bookingId }, { $set: { status, updatedAt: new Date() } });
-      return res.json({ success: true, message: 'Status updated', bookingId, status });
-    }
-
-    // ─── POST /api/bookings/late-alert  — late customer SMS ─────────
-    // Frontend sends:  POST /api/bookings/late-alert
-    //   body: { bookingId, minutesLate: 10 | 30 }
-    // bookingId is in the body because Vercel doesn't expose sub-paths.
-    if (req.method === 'POST' && (req.body?.action === 'late-alert' || (req.url || '').includes('late-alert'))) {
-      let user;
-      try { user = getUserFromHeaders(req); }
-      catch (err) { return res.status(401).json({ success: false, message: err.message }); }
-
-      const { bookingId, minutesLate = 10 } = req.body || {};
-
-      if (!bookingId) return res.status(400).json({ success: false, message: 'bookingId required' });
-
-      const booking = await col.findOne({ bookingId });
-      if (!booking) return res.status(404).json({ success: false, message: 'Booking not found' });
-
-      if (booking.status === 'Cancelled')
-        return res.json({ ok: true, skipped: true, reason: 'Already cancelled' });
-
-      // ── Build SMS ────────────────────────────────────────────────
-      const customerName = booking.customer?.name || 'Customer';
-      const serviceName  = Array.isArray(booking.services)
-        ? booking.services.map(s => s.name).join(' & ')
-        : 'your service';
-      const timeSlot = booking.timeSlot || '';
-
-      const canonBranch = canonicalizeBranch(booking.branch?.name || '');
-      const branchShort = canonBranch.charAt(0).toUpperCase() + canonBranch.slice(1);
-      const BRANCH_PHONES = {
-        pannipitiya: '077 578 5785',
-        ratnapura:   '076 688 5885',
-        kalawana:    '0777 32 95 32',
-        nivithigala: '045 227 9396',
-      };
-      const branchPhone = BRANCH_PHONES[canonBranch] || '';
-
-      const smsMessage = minutesLate >= 30
-        ? `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} was cancelled (no-show). Call ${branchPhone} to rebook. - Anura Tyres ${branchShort}`
-        : `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} hasn't started. Please arrive at Anura Tyres ${branchShort} ASAP or call ${branchPhone}.`;
-
-      // ── Normalise phone → 94XXXXXXXXX ───────────────────────────
-      let rawPhone = booking.customer?.phone || '';
-      let phone = rawPhone.replace(/[\s\-]/g, '');
-      if (phone.startsWith('+'))  phone = phone.slice(1);
-      if (phone.startsWith('0'))  phone = '94' + phone.slice(1);
-      if (!phone.startsWith('94')) phone = '94' + phone;
-
-      // ── Send via notify.lk ───────────────────────────────────────
-      let smsSent = false;
-      const userId   = process.env.NOTIFY_USER_ID;
-      const apiKey   = process.env.NOTIFY_API_KEY;
-      const senderId = process.env.NOTIFY_SENDER_ID || 'NotifyDEMO';
-
-      console.log('[late-alert] ENV — userId:', !!userId, 'apiKey:', !!apiKey, 'senderId:', senderId);
-      console.log('[late-alert] Phone:', phone, '| Length:', phone.length);
-      console.log('[late-alert] Message:', smsMessage);
-
-      if (userId && apiKey && phone.length >= 11) {
-        try {
-          const params = new URLSearchParams({ user_id: userId, api_key: apiKey, sender_id: senderId, to: phone, message: smsMessage });
-          const smsRes = await fetch(`https://app.notify.lk/api/v1/send?${params}`, { method: 'GET' });
-          const smsData = await smsRes.json().catch(() => ({}));
-          console.log('[late-alert] notify.lk HTTP:', smsRes.status, '| Response:', JSON.stringify(smsData));
-          smsSent = smsData.status === 'success';
-        } catch (smsErr) {
-          console.error('[late-alert] fetch error:', smsErr.message);
-        }
-      } else {
-        console.warn('[late-alert] Skipping SMS — missing env vars or bad phone. phone:', phone, 'userId:', !!userId, 'apiKey:', !!apiKey);
-      }
-
-      // ── Auto-cancel at 30 min ─────────────────────────
-      let autoCancelled = false;
-      if (minutesLate >= 30) {
-        await col.updateOne({ bookingId }, { $set: { status: 'Cancelled', updatedAt: new Date() } });
-        autoCancelled = true;
-        console.log('[late-alert] Auto-cancelled:', bookingId);
-      }
-
-      return res.json({ ok: true, smsSent, autoCancelled });
     }
 
     return res.status(405).json({ success: false, message: 'Method not allowed' });
