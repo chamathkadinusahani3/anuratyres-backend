@@ -483,7 +483,7 @@ module.exports = async function handler(req, res) {
         console.warn('[late-alert] Skipping SMS — missing env vars or bad phone. phone:', phone, 'userId:', !!userId, 'apiKey:', !!apiKey);
       }
 
-      // ── Auto-cancel at 30 min ────────────────────────────────────
+      // ── Auto-cancel at 30 min ─────────────────────────
       let autoCancelled = false;
       if (minutesLate >= 30) {
         await col.updateOne({ bookingId }, { $set: { status: 'Cancelled', updatedAt: new Date() } });
