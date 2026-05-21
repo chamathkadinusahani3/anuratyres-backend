@@ -28,80 +28,46 @@ function setCors(res) {
 }
 
 // ─── CANONICAL BRANCH MAP ────────────────────────────────────────
-// Source of truth for every branch name variant seen across:
-//   Website (from types.ts BRANCHES array)  → branch.name sent in POST body
-//   Admin manual booking (BookingsPage.tsx) → shortName sent in POST body
-//   Old DB records                          → whatever was stored historically
-//
-// All variants map to a lowercase canonical key used only for comparison.
-//
 const BRANCH_VARIANT_MAP = {
-  // ── Pannipitiya ──────────────────────────────────────────────────
-  // website sends:
   'anura tyres (pvt) ltd pannipitiya':  'pannipitiya',
-
-  'anura tyres pvt ltd pannipitiya':  'pannipitiya',
-  // admin manual sends:
+  'anura tyres pvt ltd pannipitiya':    'pannipitiya',
   'pannipitiya':                         'pannipitiya',
-  // old DB records:
   'pannipitiya branch':                  'pannipitiya',
-  // any other past variants:
   'anura tyres pannipitiya':             'pannipitiya',
   'anura tyre service pannipitiya':      'pannipitiya',
 
-  // ── Ratnapura ────────────────────────────────────────────────────
-  // website sends:
   'anura tyres (pvt) ltd ratnapura':    'ratnapura',
-
-  'anura tyres pvt ltd ratnapura':    'ratnapura',
-  // admin manual sends:
+  'anura tyres pvt ltd ratnapura':      'ratnapura',
   'ratnapura':                           'ratnapura',
-  // old DB records:
   'ratnapura branch':                    'ratnapura',
-  // any other past variants:
   'anura tyres ratnapura':               'ratnapura',
   'anura tyre service ratnapura':        'ratnapura',
 
-  // ── Kalawana ─────────────────────────────────────────────────────
-  // website sends:
   'anura tyres pvt ltd kalawana':       'kalawana',
-  // admin manual sends:
   'kalawana':                            'kalawana',
-  // old DB records:
   'kalawana branch':                     'kalawana',
-  // any other past variants:
   'anura tyres kalawana':                'kalawana',
   'anura tyre service kalawana':         'kalawana',
 
-  // ── Nivithigala ──────────────────────────────────────────────────
-  // website sends:
   'anura tyre service nivithigala':     'nivithigala',
-  // admin manual sends:
   'nivithigala':                         'nivithigala',
-  // old DB records:
   'nivithigala branch':                  'nivithigala',
-  // any other past variants:
   'anura tyres nivithigala':             'nivithigala',
   'anura tyres (pvt) ltd nivithigala':   'nivithigala',
 };
 
-// Returns the canonical key for any branch name variant.
 function canonicalizeBranch(name) {
   if (!name) return '';
   return BRANCH_VARIANT_MAP[name.trim().toLowerCase()] ?? name.trim().toLowerCase();
 }
 
-// Returns ALL known stored variants for a branch as an array for $in queries.
-// This ensures GET requests catch bookings stored under any past name format.
 function branchVariants(name) {
   const canon = canonicalizeBranch(name);
   const variants = Object.entries(BRANCH_VARIANT_MAP)
     .filter(([, v]) => v === canon)
     .map(([k]) =>
-      // Restore the original casing from the map key
       k.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
     );
-  // Also include raw input in case it was stored verbatim and isn't in the map
   const raw = name.trim();
   if (!variants.map(v => v.toLowerCase()).includes(raw.toLowerCase())) {
     variants.push(raw);
@@ -180,8 +146,6 @@ function getServiceCode(serviceName) {
 }
 
 // ─── BOOKING ID GENERATOR ─────────────────────────────────────────
-// Format: <SERVICE_CODES>-<BRANCH3>-<YYYYMMDD>-<MS_BASE36><RANDOM6>
-// e.g.  AW-PAN-20260424-LK8Z2QAB3X
 function generateBookingId(serviceNames, branchName, date) {
   const prefixes = [...new Set(serviceNames.map(s => getServiceCode(s)))];
   const serviceSegment = prefixes.length > 0 ? prefixes.join('-') : 'SV';
@@ -230,9 +194,6 @@ module.exports = async function handler(req, res) {
 
       const mustClauses = [];
 
-      // ── BRANCH ACCESS CONTROL ────────────────────────────────────
-      // $in over ALL known variants so bookings stored under any
-      // name format (website, manual, old records) are all returned.
       if (!user.canSeeAllBranches) {
         const variants = branchVariants(user.branch);
         mustClauses.push({ 'branch.name': { $in: variants } });
@@ -294,6 +255,57 @@ module.exports = async function handler(req, res) {
       });
     }
 
+    // ─── PATCH — UPDATE BOOKING STATUS ──────────────────────────
+    if (req.method === 'PATCH') {
+      let user;
+      try {
+        user = getUserFromHeaders(req);
+      } catch (err) {
+        return res.status(401).json({ success: false, message: err.message });
+      }
+
+      const { bookingId, status } = req.body;
+
+      if (!bookingId) {
+        return res.status(400).json({ success: false, message: 'bookingId is required' });
+      }
+
+      const VALID_STATUSES = ['Pending', 'In Progress', 'Completed', 'Cancelled', 'Waiting'];
+      if (!status || !VALID_STATUSES.includes(status)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}`,
+        });
+      }
+
+      const existing = await col.findOne({ bookingId });
+      if (!existing) {
+        return res.status(404).json({ success: false, message: 'Booking not found' });
+      }
+
+      if (
+        !user.canSeeAllBranches &&
+        canonicalizeBranch(existing.branch?.name) !== canonicalizeBranch(user.branch)
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: `You can only update bookings for ${user.branch} branch`,
+        });
+      }
+
+      await col.updateOne(
+        { bookingId },
+        { $set: { status, updatedAt: new Date() } },
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: `Booking ${bookingId} status updated to ${status}`,
+        bookingId,
+        status,
+      });
+    }
+
     // ─── ALL POST REQUESTS ───────────────────────────────────────
     if (req.method === 'POST') {
       let user;
@@ -305,7 +317,7 @@ module.exports = async function handler(req, res) {
 
       const body = req.body;
 
-      // ── LATE ALERT (must be checked before create booking) ───────
+      // ── LATE ALERT ───────────────────────────────────────────────
       if (body?.action === 'late-alert') {
         const { bookingId, minutesLate = 10 } = body;
 
@@ -348,10 +360,6 @@ module.exports = async function handler(req, res) {
         const apiKey   = process.env.NOTIFY_API_KEY;
         const senderId = process.env.NOTIFY_SENDER_ID || 'NotifyDEMO';
 
-        console.log('[late-alert] ENV userId:', !!userId, '| apiKey:', !!apiKey, '| senderId:', senderId);
-        console.log('[late-alert] phone:', phone, '| length:', phone.length);
-        console.log('[late-alert] message:', smsMessage);
-
         if (userId && apiKey && phone.length >= 11) {
           try {
             const params = new URLSearchParams({
@@ -360,20 +368,16 @@ module.exports = async function handler(req, res) {
             });
             const smsRes  = await fetch(`https://app.notify.lk/api/v1/send?${params}`, { method: 'GET' });
             const smsData = await smsRes.json().catch(() => ({}));
-            console.log('[late-alert] notify.lk HTTP:', smsRes.status, '| body:', JSON.stringify(smsData));
             smsSent = smsData.status === 'success';
           } catch (smsErr) {
             console.error('[late-alert] fetch error:', smsErr.message);
           }
-        } else {
-          console.warn('[late-alert] skipping SMS — phone:', phone, '| userId:', !!userId, '| apiKey:', !!apiKey);
         }
 
         let autoCancelled = false;
         if (minutesLate >= 30) {
           await col.updateOne({ bookingId }, { $set: { status: 'Cancelled', updatedAt: new Date() } });
           autoCancelled = true;
-          console.log('[late-alert] auto-cancelled:', bookingId);
         }
 
         return res.json({ ok: true, smsSent, autoCancelled });
@@ -399,8 +403,6 @@ module.exports = async function handler(req, res) {
         });
       }
 
-      // ── AUTHORIZATION CHECK ──────────────────────────────────────
-      // Canonicalize both sides so "Anura Tyres (Pvt) Ltd Pannipitiya" === "Pannipitiya"
       if (
         !user.canSeeAllBranches &&
         canonicalizeBranch(body.branch.name) !== canonicalizeBranch(user.branch)
@@ -416,10 +418,8 @@ module.exports = async function handler(req, res) {
         : [];
       const bookingId = generateBookingId(serviceNames, body.branch.name, body.date);
 
-      // ── DUPLICATE GUARD ──────────────────────────────────────────
       const existing = await col.findOne({ bookingId });
       if (existing) {
-        console.warn(`Duplicate bookingId generated: ${bookingId}`);
         return res.status(200).json({
           success:   true,
           message:   'Booking already exists',

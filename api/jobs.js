@@ -4,7 +4,7 @@ const { MongoClient, ObjectId } = require('mongodb');
 const MONGODB_URI = process.env.MONGODB_URI;
 
 const SERVICE_TIMES = {
-  'Wheel Balancing':        1, 'Wheel Alignment':        20,
+  'Wheel Balancing':        1,  'Wheel Alignment':        20,
   'Front Tyre Change':      20, 'Rear Tyre Change':        20,
   'Both Front Tyres':       30, 'Both Rear Tyres':         30,
   'All 4 Tyres':            50, 'Single Tyre Change':      20,
@@ -36,6 +36,56 @@ let cachedClient = null;
 async function getDb() {
   if (!cachedClient) cachedClient = await MongoClient.connect(MONGODB_URI);
   return cachedClient.db(getDbName(MONGODB_URI));
+}
+
+// ─── Sync job status → booking status ────────────────────────────────────────
+/**
+ * Mirror job status changes onto the linked booking document.
+ *
+ *  job in_progress  → booking "In Progress"
+ *  job done         → if ALL jobs for this booking are done → booking "Completed"
+ *                     otherwise                             → booking "In Progress"
+ *
+ * Silently swallows errors so a booking-sync failure never breaks the job API.
+ */
+async function syncJobStatusToBooking(db, job, newJobStatus) {
+  try {
+    if (!job.bookingId) return; // walk-in / manual job — no linked booking
+
+    const bookingsCol = db.collection('bookings');
+    const jobsCol     = db.collection('job_assignments');
+
+    let bookingOid;
+    try { bookingOid = new ObjectId(job.bookingId); } catch { return; }
+
+    const booking = await bookingsCol.findOne({ _id: bookingOid });
+    if (!booking) return;
+    // Never downgrade a booking that is already Cancelled or Completed
+    if (['Cancelled', 'Completed'].includes(booking.status)) return;
+
+    if (newJobStatus === 'in_progress') {
+      await bookingsCol.updateOne(
+        { _id: bookingOid },
+        { $set: { status: 'In Progress', updatedAt: new Date() } },
+      );
+      return;
+    }
+
+    if (newJobStatus === 'done') {
+      const allJobs = await jobsCol.find({ bookingId: job.bookingId }).toArray();
+      const allDone = allJobs.every(j =>
+        j._id.toString() === job._id.toString()
+          ? true           // the job we just stopped — count as done
+          : j.status === 'done',
+      );
+      await bookingsCol.updateOne(
+        { _id: bookingOid },
+        { $set: { status: allDone ? 'Completed' : 'In Progress', updatedAt: new Date() } },
+      );
+    }
+  } catch (err) {
+    console.error('[syncJobStatusToBooking] non-fatal error:', err.message);
+  }
 }
 
 async function syncBookingsToJobs(db, branch, dateStr) {
@@ -102,101 +152,68 @@ module.exports = async function handler(req, res) {
     const jobsCol   = db.collection('job_assignments');
     const timersCol = db.collection('job_timers');
     const logsCol   = db.collection('job_stop_logs');
-    
-    const { resource, id, branch, date } = req.query;
-    
-    // Extract path to detect /api/jobs/stop
-    const pathSegments = req.url.split('?')[0].split('/').filter(Boolean);
-    const lastSegment = pathSegments[pathSegments.length - 1];
 
-    // ── STOP JOB WITH REASON ───────────────────────────────────────────────
+    const { resource, id, branch, date } = req.query;
+
+    const pathSegments = req.url.split('?')[0].split('/').filter(Boolean);
+    const lastSegment  = pathSegments[pathSegments.length - 1];
+
+    // ── STOP JOB WITH REASON ─────────────────────────────────────────────────
     if (lastSegment === 'stop' || resource === 'jobs/stop') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
-      
+
       const { vehiclePlate, reason } = req.body;
-      if (!vehiclePlate || !reason) {
+      if (!vehiclePlate || !reason)
         return res.status(400).json({ error: 'vehiclePlate and reason required' });
-      }
 
       const validReasons = ['COMPLETED', 'TERMINATED', 'STOCK_ISSUE', 'PRICE_DISAGREE'];
-      if (!validReasons.includes(reason)) {
+      if (!validReasons.includes(reason))
         return res.status(400).json({ error: `Invalid reason. Must be one of: ${validReasons.join(', ')}` });
-      }
 
-      const now = new Date();
-
-      // Find all active jobs for this vehicle plate
-      const jobs = await jobsCol.find({
-        vehiclePlate,
-        status: { $in: ['in_progress', 'paused'] }
-      }).toArray();
-
-      if (jobs.length === 0) {
-        return res.status(404).json({ error: 'No active job found for this vehicle plate' });
-      }
+      const now  = new Date();
+      const jobs = await jobsCol.find({ vehiclePlate, status: { $in: ['in_progress', 'paused'] } }).toArray();
+      if (jobs.length === 0) return res.status(404).json({ error: 'No active job found for this vehicle plate' });
 
       const stoppedJobs = [];
       for (const job of jobs) {
-        const jid = job._id;
+        const jid   = job._id;
         const timer = await timersCol.findOne({ jobId: jid });
-        
+
         if (timer && !timer.stoppedAt) {
           const totalElapsedSecs = Math.floor((now - new Date(timer.startedAt)) / 1000);
           let totalPausedSecs = 0;
           for (const p of timer.pauseLogs) {
-            if (p.resumedAt) {
+            if (p.resumedAt)
               totalPausedSecs += Math.floor((new Date(p.resumedAt) - new Date(p.pausedAt)) / 1000);
-            }
           }
           const activeWorkSecs = totalElapsedSecs - totalPausedSecs;
           const allocatedSecs  = (job.allocatedMins || 30) * 60;
           const isOvertime     = activeWorkSecs > allocatedSecs;
           const overtimeSecs   = isOvertime ? activeWorkSecs - allocatedSecs : 0;
 
-          await timersCol.updateOne({ jobId: jid },
-            { $set: { 
-              stoppedAt: now, 
-              totalElapsedSecs, 
-              totalPausedSecs, 
-              activeWorkSecs, 
-              isOvertime, 
-              overtimeSecs,
-              stoppedReason: reason 
-            } });
+          await timersCol.updateOne({ jobId: jid }, {
+            $set: { stoppedAt: now, totalElapsedSecs, totalPausedSecs, activeWorkSecs, isOvertime, overtimeSecs, stoppedReason: reason },
+          });
         }
 
-        // Update job status to done
         await jobsCol.updateOne({ _id: jid }, { $set: { status: 'done', updatedAt: now } });
 
-        // Log the stop event
         await logsCol.insertOne({
-          jobId: jid.toString(),
-          vehiclePlate,
-          service: job.service,
-          reason,
-          stoppedAt: now,
-          stoppedBy: 'lobby_display',
-          allocatedMins: job.allocatedMins,
-          staffId: job.staffId?.toString() || null,
-          branch: job.branch,
-          date: job.date,
+          jobId: jid.toString(), vehiclePlate, service: job.service, reason, stoppedAt: now,
+          stoppedBy: 'lobby_display', allocatedMins: job.allocatedMins,
+          staffId: job.staffId?.toString() || null, branch: job.branch, date: job.date,
         });
 
-        stoppedJobs.push({
-          jobId: jid.toString(),
-          service: job.service,
-          reason
-        });
+        // ── Sync booking status ──────────────────────────────────────────────
+        await syncJobStatusToBooking(db, job, 'done');
+
+        stoppedJobs.push({ jobId: jid.toString(), service: job.service, reason });
       }
 
-      return res.status(200).json({
-        ok: true,
-        message: `Job stopped for ${vehiclePlate} with reason: ${reason}`,
-        stoppedJobs
-      });
+      return res.status(200).json({ ok: true, message: `Job stopped for ${vehiclePlate} with reason: ${reason}`, stoppedJobs });
     }
 
-    // ── FORCE SYNC — POST ?resource=sync&branch=X&date=Y ─────────────────────────
+    // ── FORCE SYNC ───────────────────────────────────────────────────────────
     if (resource === 'sync') {
       if (req.method !== 'POST') return res.status(405).end();
       if (!branch || !date) return res.status(400).json({ error: 'branch and date required' });
@@ -205,13 +222,12 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true, jobCount: count });
     }
 
-    // ── DEBUG ──────────────────────────────────────────────────────────────────
+    // ── DEBUG ────────────────────────────────────────────────────────────────
     if (resource === 'debug') {
       if (req.method !== 'GET') return res.status(405).end();
       const all = await db.collection('bookings').find({}).sort({ _id: -1 }).toArray();
       return res.status(200).json({
-        db: getDbName(MONGODB_URI),
-        total: all.length,
+        db: getDbName(MONGODB_URI), total: all.length,
         bookings: all.map(b => ({
           bookingId: b.bookingId, date: b.date, createdAt: b.createdAt,
           branchName: b.branch?.name, status: b.status,
@@ -220,7 +236,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── LOBBY ──────────────────────────────────────────────────────────────────
+    // ── LOBBY ────────────────────────────────────────────────────────────────
     if (resource === 'lobby') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
       if (!branch || !date)    return res.status(400).json({ error: 'branch and date required' });
@@ -249,7 +265,7 @@ module.exports = async function handler(req, res) {
             const end = p.resumedAt ? new Date(p.resumedAt) : now;
             paused += Math.floor((end - new Date(p.pausedAt)) / 1000);
           }
-          const active = elapsed - paused;
+          const active  = elapsed - paused;
           remainingSecs = Math.max(0, job.allocatedMins * 60 - active);
           isOvertime    = active > job.allocatedMins * 60;
         } else if (timer?.stoppedAt) {
@@ -271,7 +287,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(Object.values(byPlate));
     }
 
-    // ── REPORT ─────────────────────────────────────────────────────────────────
+    // ── REPORT ───────────────────────────────────────────────────────────────
     if (resource === 'report') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
       if (!branch || !date)    return res.status(400).json({ error: 'branch and date required' });
@@ -319,7 +335,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ── TIMER ──────────────────────────────────────────────────────────────────
+    // ── TIMER ────────────────────────────────────────────────────────────────
     if (resource === 'timer') {
       if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
       const { jobId, staffId, action, reason, supervisorId } = req.body;
@@ -340,6 +356,11 @@ module.exports = async function handler(req, res) {
           supervisorApproved: false, approvedBy: null, approvedAt: null,
         });
         await jobsCol.updateOne({ _id: jid }, { $set: { status: 'in_progress', updatedAt: now } });
+
+        // ── Sync booking to "In Progress" ────────────────────────────────────
+        const startedJob = await jobsCol.findOne({ _id: jid });
+        await syncJobStatusToBooking(db, startedJob, 'in_progress');
+
         return res.status(200).json({ ok: true, startedAt: now });
       }
 
@@ -381,6 +402,10 @@ module.exports = async function handler(req, res) {
         await timersCol.updateOne({ jobId: jid },
           { $set: { stoppedAt: now, totalElapsedSecs, totalPausedSecs, activeWorkSecs, isOvertime, overtimeSecs } });
         await jobsCol.updateOne({ _id: jid }, { $set: { status: 'done', updatedAt: now } });
+
+        // ── Sync booking to Completed / In Progress ──────────────────────────
+        await syncJobStatusToBooking(db, job, 'done');
+
         if (job?.chainedToJob) {
           await jobsCol.updateOne({ _id: job.chainedToJob }, { $set: { status: 'assigned', updatedAt: now } });
         }
@@ -390,7 +415,7 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: 'Unknown action' });
     }
 
-    // ── ASSIGN ─────────────────────────────────────────────────────────────────
+    // ── ASSIGN ───────────────────────────────────────────────────────────────
     if (resource === 'assign') {
       if (!id) return res.status(400).json({ error: 'id required' });
       let jobId;
@@ -402,13 +427,17 @@ module.exports = async function handler(req, res) {
       }
 
       if (req.method === 'PATCH') {
-        const { action, staffId, bayNumber, status, nextJobId } = req.body;
+        const { action, staffId, bayNumber, status, nextJobId, extraMins } = req.body;
         const now = new Date();
 
         if (action === 'assign_staff') {
           let sid;
           try { sid = new ObjectId(staffId); } catch { return res.status(400).json({ error: 'Invalid staffId' }); }
           await jobsCol.updateOne({ _id: jobId }, { $set: { staffId: sid, status: 'assigned', updatedAt: now } });
+          // Note: 'assigned' doesn't change booking status — booking stays Pending until timer starts
+        } else if (action === 'add_time') {
+          if (!extraMins || extraMins <= 0) return res.status(400).json({ error: 'extraMins must be positive' });
+          await jobsCol.updateOne({ _id: jobId }, { $inc: { allocatedMins: extraMins }, $set: { updatedAt: now } });
         } else if (action === 'assign_bay') {
           await jobsCol.updateOne({ _id: jobId }, { $set: { bayNumber: bayNumber ?? null, updatedAt: now } });
         } else if (action === 'unassign') {
@@ -433,7 +462,7 @@ module.exports = async function handler(req, res) {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
-    // ── GET JOB LIST ───────────────────────────────────────────────────────────
+    // ── GET JOB LIST ─────────────────────────────────────────────────────────
     if (req.method === 'GET') {
       if (!branch || !date) return res.status(400).json({ error: 'branch and date required' });
       await syncBookingsToJobs(db, branch, date);
@@ -452,7 +481,7 @@ module.exports = async function handler(req, res) {
       })));
     }
 
-    // ── CREATE MANUAL JOB ──────────────────────────────────────────────────────
+    // ── CREATE MANUAL JOB ─────────────────────────────────────────────────────
     if (req.method === 'POST') {
       const { branch: b, date: d, vehiclePlate, customerName, customerPhone, service, timeSlot } = req.body;
       if (!b || !d || !service) return res.status(400).json({ error: 'branch, date, service required' });
