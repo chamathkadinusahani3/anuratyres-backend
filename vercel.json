@@ -1,7 +1,7 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/**/*.js", "use":  "@vercel/node" }
+    { "src": "api/**/*.js", "use": "@vercel/node" }
   ],
   "routes": [
     {
@@ -13,6 +13,7 @@
       },
       "continue": true
     },
+    { "src": "/api/bookings/cron/late-alerts",   "dest": "/api/bookings.js" },
     { "src": "/api/bookings/stats/summary",      "dest": "/api/bookings/stats/summary.js" },
     { "src": "/api/bookings/availability",       "dest": "/api/bookings/availability.js" },
     { "src": "/api/bookings/([^/]+)/status",     "dest": "/api/bookings/[id].js" },
@@ -24,5 +25,11 @@
     { "src": "/api/staff",                       "dest": "/api/staff.js" },
     { "src": "/api/jobs",                        "dest": "/api/jobs.js" },
     { "src": "/api/health",                      "dest": "/api/health.js" }
+  ],
+  "crons": [
+    {
+      "path": "/api/bookings/cron/late-alerts",
+      "schedule": "* * * * *"
+    }
   ]
 }

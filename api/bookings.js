@@ -169,12 +169,164 @@ function generateBookingId(serviceNames, branchName, date) {
   return `${serviceSegment}-${branchSegment}-${dateSegment}-${tsSegment}${random}`;
 }
 
+// ─── SMS HELPER ───────────────────────────────────────────────────
+const BRANCH_PHONES = {
+  pannipitiya: '077 578 5785',
+  ratnapura:   '076 688 5885',
+  kalawana:    '0777 32 95 32',
+  nivithigala: '045 227 9396',
+};
+
+function formatPhone(raw) {
+  let phone = (raw || '').replace(/[\s-]/g, '');
+  if (phone.startsWith('+'))   phone = phone.slice(1);
+  if (phone.startsWith('0'))   phone = '94' + phone.slice(1);
+  if (!phone.startsWith('94')) phone = '94' + phone;
+  return phone;
+}
+
+async function sendSMS(rawPhone, message) {
+  const userId   = process.env.NOTIFY_USER_ID;
+  const apiKey   = process.env.NOTIFY_API_KEY;
+  const senderId = process.env.NOTIFY_SENDER_ID || 'NotifyDEMO';
+  const phone    = formatPhone(rawPhone);
+
+  if (!userId || !apiKey || phone.length < 11) return false;
+
+  try {
+    const params = new URLSearchParams({
+      user_id: userId, api_key: apiKey,
+      sender_id: senderId, to: phone, message,
+    });
+    const smsRes  = await fetch(`https://app.notify.lk/api/v1/send?${params}`, { method: 'GET' });
+    const smsData = await smsRes.json().catch(() => ({}));
+    return smsData.status === 'success';
+  } catch (err) {
+    console.error('[sendSMS] error:', err.message);
+    return false;
+  }
+}
+
+// ─── CRON: LATE ALERT HANDLER ────────────────────────────────────
+// Called when req.url matches /api/bookings/cron/late-alerts (GET)
+// Vercel cron / cron-job.org hits this every minute with the Authorization header.
+async function handleCronLateAlerts(req, res) {
+  // Security — must carry the shared secret
+  const auth = (req.headers['authorization'] || '').trim();
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const db          = await getDb();
+  const bookingsCol = db.collection('bookings');
+  const alertsCol   = db.collection('sentAlerts');
+
+  // Ensure indexes exist (idempotent after first run)
+  await alertsCol.createIndex({ key: 1 }, { unique: true });
+  // Auto-expire records after 7 days so the collection stays small
+  await alertsCol.createIndex({ sentAt: 1 }, { expireAfterSeconds: 604800 });
+
+  // Sri Lanka is UTC+5:30 — compute today's date string in local time
+  const nowUTC    = new Date();
+  const nowSL     = new Date(nowUTC.getTime() + 330 * 60_000); // +5h30m
+  const todayStr  = nowSL.toISOString().split('T')[0];         // "YYYY-MM-DD"
+  const nowH      = nowSL.getUTCHours();
+  const nowM      = nowSL.getUTCMinutes();
+  const nowMinutes = nowH * 60 + nowM;                         // minutes since midnight SL
+
+  // Only fetch Pending bookings that have a timeSlot
+  const pendingBookings = await bookingsCol
+    .find({ status: 'Pending', timeSlot: { $exists: true, $ne: '' } })
+    .toArray();
+
+  const results = [];
+
+  for (const booking of pendingBookings) {
+    // ── Check booking is for today (SL time) ──────────────────────────────
+    const bookingDateUTC = new Date(booking.date);
+    const bookingDateSL  = new Date(bookingDateUTC.getTime() + 330 * 60_000);
+    const bookingDateStr = bookingDateSL.toISOString().split('T')[0];
+    if (bookingDateStr !== todayStr) continue;
+
+    // ── How many minutes late? ────────────────────────────────────────────
+    const [slotH, slotM] = booking.timeSlot.split(':').map(Number);
+    if (isNaN(slotH) || isNaN(slotM)) continue;
+    const slotMinutes = slotH * 60 + slotM;
+    const late        = nowMinutes - slotMinutes;
+    if (late < 10) continue; // not late yet
+
+    const levels = late >= 30 ? [10, 30] : [10];
+
+    for (const level of levels) {
+      const alertKey = `${booking.bookingId}-${level}`;
+
+      // ── Idempotency: skip if already fired ───────────────────────────────
+      const alreadySent = await alertsCol.findOne({ key: alertKey });
+      if (alreadySent) continue;
+
+      // Mark BEFORE sending to prevent duplicate if SMS call hangs / retry races
+      try {
+        await alertsCol.insertOne({ key: alertKey, sentAt: new Date() });
+      } catch (dupErr) {
+        // Duplicate key = another invocation beat us, skip safely
+        continue;
+      }
+
+      // ── Build message ─────────────────────────────────────────────────────
+      const customerName = booking.customer?.name || 'Customer';
+      const serviceName  = Array.isArray(booking.services)
+        ? booking.services.map(s => s.name).join(' & ')
+        : 'your service';
+      const canonBranch  = canonicalizeBranch(booking.branch?.name || '');
+      const branchShort  = canonBranch.charAt(0).toUpperCase() + canonBranch.slice(1);
+      const branchPhone  = BRANCH_PHONES[canonBranch] || '';
+
+      const message = level >= 30
+        ? `Hi ${customerName}, your ${serviceName} appt at ${booking.timeSlot} was cancelled (no-show). Call ${branchPhone} to rebook. - Anura Tyres ${branchShort}`
+        : `Hi ${customerName}, your ${serviceName} appt at ${booking.timeSlot} hasn't started. Please arrive at Anura Tyres ${branchShort} ASAP or call ${branchPhone}.`;
+
+      const smsSent = await sendSMS(booking.customer?.phone || '', message);
+
+      // ── Auto-cancel at 30 min ─────────────────────────────────────────────
+      let autoCancelled = false;
+      if (level >= 30) {
+        await bookingsCol.updateOne(
+          { bookingId: booking.bookingId },
+          { $set: { status: 'Cancelled', updatedAt: new Date() } },
+        );
+        autoCancelled = true;
+      }
+
+      results.push({ bookingId: booking.bookingId, level, smsSent, autoCancelled });
+      console.log(`[cron/late-alerts] ${booking.bookingId} level=${level} smsSent=${smsSent} autoCancelled=${autoCancelled}`);
+    }
+  }
+
+  return res.status(200).json({ ok: true, processed: results.length, results });
+}
+
 // ─── MAIN HANDLER ─────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   setCors(res);
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
+  }
+
+  // ── Route: cron/late-alerts ──────────────────────────────────────
+  // Matches GET /api/bookings/cron/late-alerts
+  // (Vercel strips the /api/bookings prefix but passes it in req.url)
+  const url = (req.url || '').split('?')[0].replace(/\/$/, '');
+  if (url.endsWith('/cron/late-alerts') || url.endsWith('/cron-late-alerts')) {
+    if (req.method !== 'GET') {
+      return res.status(405).json({ error: 'Method not allowed — use GET' });
+    }
+    try {
+      return await handleCronLateAlerts(req, res);
+    } catch (err) {
+      console.error('[cron/late-alerts] unhandled error:', err);
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
 
   try {
@@ -317,7 +469,10 @@ module.exports = async function handler(req, res) {
 
       const body = req.body;
 
-      // ── LATE ALERT ───────────────────────────────────────────────
+      // ── LATE ALERT (legacy client-side trigger — kept for compatibility) ──
+      // NOTE: SMS is now handled by the cron route above.
+      // This block only runs if the old frontend still fires it;
+      // it is safe to remove once BookingsPage.tsx is updated.
       if (body?.action === 'late-alert') {
         const { bookingId, minutesLate = 10 } = body;
 
@@ -329,50 +484,35 @@ module.exports = async function handler(req, res) {
         if (booking.status === 'Cancelled')
           return res.json({ ok: true, skipped: true, reason: 'Already cancelled' });
 
+        // Check sentAlerts so even the legacy path can't double-send
+        const alertsCol = db.collection('sentAlerts');
+        const level     = minutesLate >= 30 ? 30 : 10;
+        const alertKey  = `${bookingId}-${level}`;
+        const already   = await alertsCol.findOne({ key: alertKey });
+
+        if (already) {
+          return res.json({ ok: true, skipped: true, reason: 'Already sent by cron' });
+        }
+
+        try {
+          await alertsCol.insertOne({ key: alertKey, sentAt: new Date() });
+        } catch {
+          return res.json({ ok: true, skipped: true, reason: 'Duplicate' });
+        }
+
         const customerName = booking.customer?.name || 'Customer';
         const serviceName  = Array.isArray(booking.services)
           ? booking.services.map(s => s.name).join(' & ')
           : 'your service';
-        const timeSlot = booking.timeSlot || '';
-
-        const canonBranch = canonicalizeBranch(booking.branch?.name || '');
-        const branchShort = canonBranch.charAt(0).toUpperCase() + canonBranch.slice(1);
-        const BRANCH_PHONES = {
-          pannipitiya: '077 578 5785',
-          ratnapura:   '076 688 5885',
-          kalawana:    '0777 32 95 32',
-          nivithigala: '045 227 9396',
-        };
-        const branchPhone = BRANCH_PHONES[canonBranch] || '';
+        const canonBranch  = canonicalizeBranch(booking.branch?.name || '');
+        const branchShort  = canonBranch.charAt(0).toUpperCase() + canonBranch.slice(1);
+        const branchPhone  = BRANCH_PHONES[canonBranch] || '';
 
         const smsMessage = minutesLate >= 30
-          ? `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} was cancelled (no-show). Call ${branchPhone} to rebook. - Anura Tyres ${branchShort}`
-          : `Hi ${customerName}, your ${serviceName} appt at ${timeSlot} hasn't started. Please arrive at Anura Tyres ${branchShort} ASAP or call ${branchPhone}.`;
+          ? `Hi ${customerName}, your ${serviceName} appt at ${booking.timeSlot} was cancelled (no-show). Call ${branchPhone} to rebook. - Anura Tyres ${branchShort}`
+          : `Hi ${customerName}, your ${serviceName} appt at ${booking.timeSlot} hasn't started. Please arrive at Anura Tyres ${branchShort} ASAP or call ${branchPhone}.`;
 
-        let rawPhone = booking.customer?.phone || '';
-        let phone = rawPhone.replace(/[\s-]/g, '');
-        if (phone.startsWith('+'))   phone = phone.slice(1);
-        if (phone.startsWith('0'))   phone = '94' + phone.slice(1);
-        if (!phone.startsWith('94')) phone = '94' + phone;
-
-        let smsSent = false;
-        const userId   = process.env.NOTIFY_USER_ID;
-        const apiKey   = process.env.NOTIFY_API_KEY;
-        const senderId = process.env.NOTIFY_SENDER_ID || 'NotifyDEMO';
-
-        if (userId && apiKey && phone.length >= 11) {
-          try {
-            const params = new URLSearchParams({
-              user_id: userId, api_key: apiKey,
-              sender_id: senderId, to: phone, message: smsMessage,
-            });
-            const smsRes  = await fetch(`https://app.notify.lk/api/v1/send?${params}`, { method: 'GET' });
-            const smsData = await smsRes.json().catch(() => ({}));
-            smsSent = smsData.status === 'success';
-          } catch (smsErr) {
-            console.error('[late-alert] fetch error:', smsErr.message);
-          }
-        }
+        const smsSent = await sendSMS(booking.customer?.phone || '', smsMessage);
 
         let autoCancelled = false;
         if (minutesLate >= 30) {
