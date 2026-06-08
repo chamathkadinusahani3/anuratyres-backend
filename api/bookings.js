@@ -207,6 +207,123 @@ async function sendSMS(rawPhone, message) {
   }
 }
 
+// ─── AVAILABILITY: capacity per branch + per-slot booking counts ─
+// Folded in from the old standalone /api/bookings/availability.js so this
+// file can serve /api/bookings/availability without costing an extra
+// serverless function (Vercel Hobby plan caps a deployment at 12).
+const BRANCH_CAPACITY = {
+  'pannipitiya': 3,
+  'ratnapura':   2,
+  'kalawana':    2,
+  'nivithigala': 2,
+};
+
+const ALL_TIME_SLOTS = [
+  '08:30','09:00','09:30','10:00','10:30','11:00','11:30','12:00',
+  '13:00','13:30','14:00','14:30','15:00','15:30','16:00','16:30',
+  '17:00','17:30','18:00','18:30','19:00',
+];
+
+// Called when req.url matches /api/bookings/availability (GET)
+async function handleAvailability(req, res) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  const { branch, date } = req.query;
+  if (!branch || !date) {
+    return res.status(400).json({ success: false, message: 'branch and date are required' });
+  }
+
+  try {
+    const db  = await getDb();
+    const col = db.collection('bookings');
+
+    const canon    = canonicalizeBranch(branch);
+    const variants = branchVariants(branch); // all stored name formats for this branch
+    const capacity = BRANCH_CAPACITY[canon] ?? 2;
+
+    const dayStart = new Date(`${date}T00:00:00.000Z`);
+    dayStart.setMinutes(dayStart.getMinutes() - 330); // shift back 5h30m to UTC
+    const dayEnd = new Date(`${date}T23:59:59.999Z`);
+
+    const bookings = await col.find({
+      'branch.name': { $in: variants },
+      date:          { $gte: dayStart, $lte: dayEnd },
+      status:        { $nin: ['Cancelled'] },
+    }).project({ timeSlot: 1 }).toArray();
+
+    const slotCounts = {};
+    for (const b of bookings) {
+      if (b.timeSlot) slotCounts[b.timeSlot] = (slotCounts[b.timeSlot] || 0) + 1;
+    }
+
+    const slots = ALL_TIME_SLOTS.map(time => ({
+      time,
+      booked:    slotCounts[time] || 0,
+      capacity,
+      available: (slotCounts[time] || 0) < capacity,
+    }));
+
+    return res.status(200).json({ success: true, branch, date, capacity, slots });
+  } catch (err) {
+    console.error('availability error:', err);
+    return res.status(500).json({ success: false, message: 'Server error', error: err.message });
+  }
+}
+
+// ─── STATS SUMMARY: today + overall booking counts by status ────
+// Folded in from the old standalone /api/bookings/stats/summary.js for the
+// same reason — keeps this deployment under the 12-function cap.
+// Called when req.url matches /api/bookings/stats/summary (GET)
+async function handleStatsSummary(req, res) {
+  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
+
+  try {
+    const db  = await getDb();
+    const col = db.collection('bookings');
+
+    const branch = (req.query.branch || '').trim();
+    const branchFilter = branch
+      ? { 'branch.name': { $regex: branch, $options: 'i' } }
+      : {};
+
+    // Today's date range in Sri Lanka time (UTC+5:30)
+    const SL_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const nowSL        = new Date(Date.now() + SL_OFFSET_MS);
+    const todayStr     = nowSL.toISOString().slice(0, 10); // "YYYY-MM-DD"
+    const dayStartUTC  = new Date(new Date(todayStr + 'T00:00:00.000Z').getTime() - SL_OFFSET_MS);
+    const dayEndUTC    = new Date(new Date(todayStr + 'T23:59:59.999Z').getTime() - SL_OFFSET_MS);
+    const todayFilter  = {
+      date: { $gte: dayStartUTC.toISOString(), $lte: dayEndUTC.toISOString() },
+    };
+
+    const [
+      total, pending, inProgress, completed, cancelled,
+      todayTotal, todayPending, todayInProgress, todayCompleted,
+    ] = await Promise.all([
+      col.countDocuments({ ...branchFilter }),
+      col.countDocuments({ ...branchFilter, status: 'Pending' }),
+      col.countDocuments({ ...branchFilter, status: 'In Progress' }),
+      col.countDocuments({ ...branchFilter, status: 'Completed' }),
+      col.countDocuments({ ...branchFilter, status: 'Cancelled' }),
+      col.countDocuments({ ...branchFilter, ...todayFilter }),
+      col.countDocuments({ ...branchFilter, ...todayFilter, status: 'Pending' }),
+      col.countDocuments({ ...branchFilter, ...todayFilter, status: 'In Progress' }),
+      col.countDocuments({ ...branchFilter, ...todayFilter, status: 'Completed' }),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      stats: {
+        total, pending, inProgress, completed, cancelled,
+        today: { total: todayTotal, pending: todayPending, inProgress: todayInProgress, completed: todayCompleted },
+      },
+    });
+  } catch (err) {
+    console.error('stats/summary error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+}
+
 // ─── CRON: LATE ALERT HANDLER ────────────────────────────────────
 // Called when req.url matches /api/bookings/cron/late-alerts (GET)
 // Vercel cron / cron-job.org hits this every minute with the Authorization header.
@@ -334,6 +451,18 @@ module.exports = async function handler(req, res) {
       console.error('[cron/late-alerts] unhandled error:', err);
       return res.status(500).json({ ok: false, error: err.message });
     }
+  }
+
+  // ── Route: availability ───────────────────────────────────────────
+  // Matches GET /api/bookings/availability (folded in — see handleAvailability)
+  if (url.endsWith('/availability')) {
+    return handleAvailability(req, res);
+  }
+
+  // ── Route: stats/summary ──────────────────────────────────────────
+  // Matches GET /api/bookings/stats/summary (folded in — see handleStatsSummary)
+  if (url.endsWith('/stats/summary')) {
+    return handleStatsSummary(req, res);
   }
 
   try {
