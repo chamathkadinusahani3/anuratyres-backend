@@ -13,7 +13,15 @@
       },
       "continue": true
     },
-    { "src": "/api/bookings/cron/late-alerts",   "dest": "/api/bookings.js" },
+{ "src": "/api/inventory/import/([^/]+)",    "dest": "/api/inventory/import/[jobId].js" },
+    { "src": "/api/inventory/import",            "dest": "/api/inventory/import.js" },
+    { "src": "/api/inventory/export",            "dest": "/api/inventory/export.js" },
+    { "src": "/api/inventory/template",          "dest": "/api/inventory/template.js" },
+    { "src": "/api/inventory/movements",         "dest": "/api/inventory/movements.js" },
+    { "src": "/api/inventory/([^/]+)/restock",   "dest": "/api/inventory/[id].js" },
+    { "src": "/api/inventory/([^/]+)",           "dest": "/api/inventory/[id].js" },
+    { "src": "/api/inventory",                   "dest": "/api/inventory.js" },
+    { "src": "/api/bookings/cron/late-alerts",   "dest": "/api/bookings/cron/late-alerts.js" },
     { "src": "/api/bookings/stats/summary",      "dest": "/api/bookings/stats/summary.js" },
     { "src": "/api/bookings/availability",       "dest": "/api/bookings/availability.js" },
     { "src": "/api/bookings/([^/]+)/status",     "dest": "/api/bookings/[id].js" },
@@ -24,12 +32,14 @@
     { "src": "/api/customers",                   "dest": "/api/customers.js" },
     { "src": "/api/staff",                       "dest": "/api/staff.js" },
     { "src": "/api/jobs",                        "dest": "/api/jobs.js" },
-    { "src": "/api/health",                      "dest": "/api/health.js" }
+    { "src": "/api/health",                                         "dest": "/api/health.js" },
+    { "src": "/api/quotations/([a-f0-9]{24})/status",             "dest": "/api/quotations.js" },
+    { "src": "/api/quotations/([a-f0-9]{24})",                    "dest": "/api/quotations.js" },
+    { "src": "/api/quotations",                                   "dest": "/api/quotations.js" },
+    { "src": "/api/invoices/([a-f0-9]{24})/payment",             "dest": "/api/invoices.js" },
+    { "src": "/api/invoices/([a-f0-9]{24})/status",              "dest": "/api/invoices.js" },
+    { "src": "/api/invoices/([a-f0-9]{24})",                     "dest": "/api/invoices.js" },
+    { "src": "/api/invoices",                                     "dest": "/api/invoices.js" }
   ],
-  "crons": [
-    {
-      "path": "/api/bookings/cron/late-alerts",
-      "schedule": "* * * * *"
-    }
-  ]
+  "crons": []
 }

@@ -211,9 +211,16 @@ async function sendSMS(rawPhone, message) {
 // Called when req.url matches /api/bookings/cron/late-alerts (GET)
 // Vercel cron / cron-job.org hits this every minute with the Authorization header.
 async function handleCronLateAlerts(req, res) {
-  // Security — must carry the shared secret
-  const auth = (req.headers['authorization'] || '').trim();
-  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
+  // Security — accept via Authorization header (Vercel) or ?secret= query param (cron-job.org)
+  const cronSecret  = process.env.CRON_SECRET;
+  const authHeader  = (req.headers['authorization'] || '').trim();
+  const querySecret = (req.query?.secret || '').trim();
+
+  const authorized = cronSecret && (
+    authHeader  === `Bearer ${cronSecret}` ||
+    querySecret === cronSecret
+  );
+  if (!authorized) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 

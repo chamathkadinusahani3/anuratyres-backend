@@ -37,6 +37,26 @@ async function getDb() {
   return cachedClient.db('anura-tyres');
 }
 
+// ─── Default service prices (seeded on first GET) ────────────────────────────
+const DEFAULT_SERVICE_PRICES = [
+  { name: 'Wheel Balancing',      code: 'WB',  price: 800,   duration: 30  },
+  { name: 'Wheel Alignment',      code: 'AL',  price: 2500,  duration: 60  },
+  { name: 'Tyre Replacement',     code: 'TR',  price: 4000,  duration: 45  },
+  { name: 'Tyre Rotation',        code: 'RT',  price: 1000,  duration: 30  },
+  { name: 'Nitrogen Filling',     code: 'NF',  price: 500,   duration: 15  },
+  { name: 'Flat Repair',          code: 'FR',  price: 600,   duration: 20  },
+  { name: 'Puncture Repair',      code: 'PR',  price: 600,   duration: 20  },
+  { name: 'Brake Service',        code: 'BS',  price: 5000,  duration: 90  },
+  { name: 'Suspension Check',     code: 'SC',  price: 1500,  duration: 45  },
+  { name: 'Oil Change',           code: 'OC',  price: 3500,  duration: 30  },
+  { name: 'Battery Service',      code: 'BAT', price: 2000,  duration: 30  },
+  { name: 'AC Service',           code: 'AC',  price: 8000,  duration: 120 },
+  { name: 'Full Service',         code: 'FS',  price: 12000, duration: 180 },
+  { name: 'Wheel Change',         code: 'WC',  price: 1500,  duration: 30  },
+  { name: 'Tyre Sales',           code: 'TS',  price: 0,     duration: 20  },
+  { name: 'Heavy Vehicle Alignment', code: 'HV', price: 6000, duration: 90 },
+];
+
 // ─── Notification helper ──────────────────────────────────────────────────────
 async function pushNotification(notifCol, { branch, type, title, message }) {
   await notifCol.insertOne({
@@ -57,12 +77,89 @@ module.exports = async function handler(req, res) {
 
   try {
     const db       = await getDb();
-    const staffCol = db.collection('staff');
-    const dayCol   = db.collection('staff_day_status');
-    const leaveCol = db.collection('leave_requests');
-    const notifCol = db.collection('notifications');
+    const staffCol    = db.collection('staff');
+    const dayCol      = db.collection('staff_day_status');
+    const leaveCol    = db.collection('leave_requests');
+    const notifCol    = db.collection('notifications');
+    const pricesCol   = db.collection('service_prices');
+    const bookingsCol = db.collection('bookings');
 
-    const { resource, action, id, branch, date, staffId } = req.query;
+    const { resource, action, id, branch, date, staffId, month } = req.query;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SERVICE PRICES  (?resource=service-prices)
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (resource === 'service-prices') {
+      if (req.method === 'GET') {
+        let prices = await pricesCol.find({}).sort({ name: 1 }).toArray();
+        if (prices.length === 0) {
+          await pricesCol.insertMany(DEFAULT_SERVICE_PRICES.map(p => ({ ...p })));
+          prices = await pricesCol.find({}).sort({ name: 1 }).toArray();
+        }
+        return res.status(200).json(prices.map(p => ({ ...p, id: p._id.toString() })));
+      }
+      // PUT — replace entire price list
+      if (req.method === 'PUT') {
+        const { prices } = req.body;
+        if (!Array.isArray(prices)) return res.status(400).json({ error: 'prices array required' });
+        await pricesCol.deleteMany({});
+        if (prices.length > 0) {
+          await pricesCol.insertMany(prices.map(({ id: _id, ...p }) => ({
+            name:     String(p.name || '').trim(),
+            code:     String(p.code || '').trim().toUpperCase(),
+            price:    Number(p.price)    || 0,
+            duration: Number(p.duration) || 0,
+          })));
+        }
+        return res.status(200).json({ ok: true });
+      }
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PAYROLL STATS  (?resource=payroll-stats&branch=X&month=YYYY-MM)
+    // Returns real revenue from completed bookings × configured service prices
+    // ═══════════════════════════════════════════════════════════════════════════
+    if (resource === 'payroll-stats') {
+      if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
+
+      const targetMonth = month || new Date().toISOString().slice(0, 7); // "2026-06"
+      const [yr, mo]    = targetMonth.split('-').map(Number);
+      const SL_OFFSET   = 5.5 * 60 * 60 * 1000;
+
+      // Month boundaries in SL time → UTC ISO strings
+      const monthStartSL = new Date(Date.UTC(yr, mo - 1, 1, 0, 0, 0));
+      const monthEndSL   = new Date(Date.UTC(yr, mo,     0, 23, 59, 59, 999));
+      const startISO     = new Date(monthStartSL.getTime() - SL_OFFSET).toISOString();
+      const endISO       = new Date(monthEndSL.getTime()   - SL_OFFSET).toISOString();
+
+      // Build price lookup  (case-insensitive name → price)
+      const allPrices = await pricesCol.find({}).toArray();
+      const priceMap  = {};
+      allPrices.forEach(p => { priceMap[p.name.toLowerCase().trim()] = p.price || 0; });
+
+      // Completed bookings for the period (optionally branch-filtered)
+      const bQuery = { status: 'Completed', date: { $gte: startISO, $lte: endISO } };
+      if (branch) bQuery['branch.name'] = { $regex: branch, $options: 'i' };
+
+      const bookings = await bookingsCol.find(bQuery).toArray();
+
+      let totalRevenue = 0;
+      bookings.forEach(b => {
+        (b.services || []).forEach(svc => {
+          const key   = (svc.name || '').toLowerCase().trim();
+          totalRevenue += priceMap[key] || 0;
+        });
+      });
+
+      return res.status(200).json({
+        ok:           true,
+        month:        targetMonth,
+        totalJobs:    bookings.length,
+        totalRevenue,
+        bookingCount: bookings.length,
+      });
+    }
 
     // ═══════════════════════════════════════════════════════════════════════════
     // NOTIFICATION ROUTES  (?resource=notifications)
@@ -246,13 +343,18 @@ module.exports = async function handler(req, res) {
 
       return res.status(200).json(
         members.map(m => ({
-          id:       m._id,
-          _id:      m._id,
-          name:     m.name,
-          role:     m.role,
-          username: m.username,
-          phone:    m.phone || '',
-          branch:   m.branch,
+          id:           m._id,
+          _id:          m._id,
+          name:         m.name,
+          role:         m.role,
+          jobTitle:     m.jobTitle || m.role || '',
+          username:     m.username,
+          phone:        m.phone || '',
+          branch:       m.branch,
+          skills:       m.skills       || [],
+          workingHours: m.workingHours || null,
+          baseSalary:   m.baseSalary   ?? null,
+          otRate:       m.otRate       ?? null,
           dayStatus: statusMap[m._id.toString()] || {
             status: 'off', bayNumber: null, clockInAt: null,
           },
@@ -286,7 +388,7 @@ module.exports = async function handler(req, res) {
       }
 
       if (action === 'register') {
-        const { username, password, name, role, branch: b, phone } = req.body;
+        const { username, password, name, role, jobTitle, branch: b, phone, skills, workingHours, baseSalary, otRate } = req.body;
         if (!username || !password || !name || !b)
           return res.status(400).json({ error: 'username, password, name, branch required' });
 
@@ -295,20 +397,51 @@ module.exports = async function handler(req, res) {
 
         const passwordHash = await bcrypt.hash(password, 10);
         const result = await staffCol.insertOne({
-          username: username.toLowerCase().trim(), passwordHash,
-          name, role: role || 'mechanic', branch: b, phone: phone || '',
-          active: true, createdAt: new Date(),
+          username:     username.toLowerCase().trim(),
+          passwordHash,
+          name,
+          role:         role || 'Cashier',
+          jobTitle:     jobTitle || role || 'Staff',
+          branch:       b,
+          phone:        phone || '',
+          skills:       Array.isArray(skills) ? skills : [],
+          workingHours: workingHours || null,
+          baseSalary:   baseSalary   ? Number(baseSalary)  : null,
+          otRate:       otRate       ? Number(otRate)       : null,
+          active:       true,
+          createdAt:    new Date(),
         });
         return res.status(201).json({ id: result.insertedId, name, username });
       }
 
       if (action === 'update') {
-        const { id: uid, name, role, branch: b, phone, password } = req.body;
+        const { id: uid, name, role, jobTitle, branch: b, phone, password, skills, baseSalary, otRate } = req.body;
         if (!uid) return res.status(400).json({ error: 'id required' });
         let oid;
         try { oid = new ObjectId(uid); } catch { return res.status(400).json({ error: 'Invalid id' }); }
-        const update = { name, role, branch: b, phone: phone || '' };
+        const update = {
+          name,
+          role,
+          jobTitle:   jobTitle || role,
+          branch:     b,
+          phone:      phone || '',
+          skills:     Array.isArray(skills) ? skills : [],
+        };
+        if (baseSalary !== undefined && baseSalary !== null) update.baseSalary = Number(baseSalary);
+        if (otRate     !== undefined && otRate     !== null) update.otRate     = Number(otRate);
         if (password && password.length >= 6) update.passwordHash = await bcrypt.hash(password, 10);
+        await staffCol.updateOne({ _id: oid }, { $set: update });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (action === 'update-salary') {
+        const { id: uid, baseSalary, otRate } = req.body;
+        if (!uid) return res.status(400).json({ error: 'id required' });
+        let oid;
+        try { oid = new ObjectId(uid); } catch { return res.status(400).json({ error: 'Invalid id' }); }
+        const update = {};
+        if (baseSalary !== undefined) update.baseSalary = Number(baseSalary) || 0;
+        if (otRate     !== undefined) update.otRate     = Number(otRate)     || 0;
         await staffCol.updateOne({ _id: oid }, { $set: update });
         return res.status(200).json({ ok: true });
       }

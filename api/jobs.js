@@ -287,6 +287,309 @@ module.exports = async function handler(req, res) {
       return res.status(200).json(Object.values(byPlate));
     }
 
+    // ── STAFF PERFORMANCE (real-time from jobs) ──────────────────────────────
+    if (resource === 'staff-performance') {
+      if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
+      if (!branch || !date)    return res.status(400).json({ error: 'branch and date required' });
+
+      // Jobs for the day with timer data
+      const jobs = await jobsCol.aggregate([
+        { $match: { branch, date } },
+        { $lookup: { from: 'job_timers', localField: '_id', foreignField: 'jobId', as: 'timerArr' } },
+      ]).toArray();
+
+      // Service price lookup for revenue calculation
+      const pricesCol = db.collection('service_prices');
+      const allPrices = await pricesCol.find({}).toArray();
+      const priceMap  = {};
+      allPrices.forEach(p => { priceMap[p.name.toLowerCase().trim()] = p.price || 0; });
+
+      const staffMap = {};
+
+      for (const job of jobs) {
+        if (!job.staffId) continue;
+        const sid   = job.staffId.toString();
+        const timer = job.timerArr[0] || null;
+        const now   = Date.now();
+
+        if (!staffMap[sid]) {
+          staffMap[sid] = {
+            staffId:        sid,
+            jobsCompleted:  0,
+            jobsInProgress: 0,
+            jobsPending:    0,
+            jobsOverdue:    0,
+            totalRevenue:   0,
+            overtimeMins:   0,
+            allocatedMins:  0,
+            activeWorkMins: 0,
+            pauseCount:     0,
+            activeBay:      null,
+            currentJob:     null,
+          };
+        }
+
+        const s = staffMap[sid];
+
+        // Track which bay this staff is currently active in
+        if (job.bayNumber && ['in_progress', 'paused', 'assigned'].includes(job.status)) {
+          s.activeBay = String(job.bayNumber);
+        }
+
+        s.allocatedMins += job.allocatedMins || 0;
+
+        if (job.status === 'done') {
+          s.jobsCompleted++;
+          s.totalRevenue  += priceMap[(job.service || '').toLowerCase().trim()] || 0;
+          if (timer) {
+            const workMins = Math.round((timer.activeWorkSecs || 0) / 60);
+            const otMins   = Math.round((timer.overtimeSecs   || 0) / 60);
+            s.activeWorkMins += workMins;
+            s.overtimeMins   += otMins;
+            s.pauseCount     += (timer.pauseLogs || []).length;
+            if (timer.isOvertime) s.jobsOverdue++;
+          }
+        } else if (job.status === 'in_progress' || job.status === 'paused') {
+          s.jobsInProgress++;
+          if (timer) {
+            s.pauseCount += (timer.pauseLogs || []).length;
+            // Live elapsed for current in-progress job
+            const elapsedSecs = timer.startedAt
+              ? Math.floor((now - new Date(timer.startedAt).getTime()) / 1000)
+              : 0;
+            let livePausedSecs = 0;
+            for (const p of (timer.pauseLogs || [])) {
+              if (p.resumedAt) livePausedSecs += Math.floor((new Date(p.resumedAt) - new Date(p.pausedAt)) / 1000);
+              else livePausedSecs += Math.floor((now - new Date(p.pausedAt).getTime()) / 1000);
+            }
+            const liveWorkSecs     = Math.max(0, elapsedSecs - livePausedSecs);
+            const allocatedSecs    = (job.allocatedMins || 30) * 60;
+            const liveOverSecs     = Math.max(0, liveWorkSecs - allocatedSecs);
+            const liveIsOvertime   = liveWorkSecs > allocatedSecs;
+
+            // Set currentJob for bay map display
+            if (!s.currentJob || job.status === 'in_progress') {
+              s.currentJob = {
+                service:       job.service || '',
+                vehiclePlate:  job.vehiclePlate || '',
+                allocatedMins: job.allocatedMins || 30,
+                liveWorkMins:  Math.round(liveWorkSecs  / 60),
+                liveOverMins:  Math.round(liveOverSecs  / 60),
+                isOvertime:    liveIsOvertime,
+                status:        job.status,
+                bayNumber:     job.bayNumber || null,
+              };
+            }
+          }
+        } else if (job.status === 'assigned') {
+          s.jobsPending++;
+        }
+      }
+
+      const result = Object.values(staffMap).map((s) => ({
+        ...s,
+        efficiencyPct: s.allocatedMins > 0 && s.activeWorkMins > 0
+          ? Math.round(Math.min((s.allocatedMins / s.activeWorkMins) * 100, 150))
+          : null,
+        onTimeRate: s.jobsCompleted > 0
+          ? Math.round(((s.jobsCompleted - s.jobsOverdue) / s.jobsCompleted) * 100)
+          : null,
+      }));
+
+      return res.status(200).json(result);
+    }
+
+    // ── BUSINESS ANALYTICS REPORTS ──────────────────────────────────────────
+    if (resource === 'reports') {
+      if (req.method !== 'GET') return res.status(405).json({ error: 'GET only' });
+
+      const { type, from, to } = req.query;
+      const invoicesCol  = db.collection('invoices');
+      const pricesCol    = db.collection('service_prices');
+      const inventoryCol = db.collection('inventory');
+      const staffCol     = db.collection('staff');
+
+      // Branch filter
+      const bFilter = branch && branch !== 'All' ? { branch } : {};
+
+      // Date range helpers
+      const dateFilter = (field) => {
+        if (!from && !to) return {};
+        const d = {};
+        if (from) d.$gte = from;
+        if (to)   d.$lte = to;
+        return { [field]: d };
+      };
+
+      // ── type=overview: KPI totals ─────────────────────────────────────────
+      if (type === 'overview') {
+        const [invoices, allJobs] = await Promise.all([
+          invoicesCol.find({ ...bFilter, ...dateFilter('invoiceDate') }).toArray(),
+          jobsCol.find({ ...bFilter, ...dateFilter('date') }).toArray(),
+        ]);
+        const paidInvs     = invoices.filter(i => i.paymentStatus === 'Paid');
+        const totalRevenue = paidInvs.reduce((a, i) => a + (i.total || 0), 0);
+        const partsTotal   = invoices.reduce((a, i) => a + (i.partsTotal   || 0), 0);
+        const labourTotal  = invoices.reduce((a, i) => a + (i.labourCharge || 0), 0);
+        const discounts    = invoices.reduce((a, i) => a + (i.discountAmt  || 0), 0);
+        const outstanding  = invoices.filter(i => i.paymentStatus !== 'Paid' && i.paymentStatus !== 'Void')
+                              .reduce((a, i) => a + (i.balance || 0), 0);
+        const completed    = allJobs.filter(j => j.status === 'done').length;
+        const avgJobRev    = paidInvs.length > 0 ? Math.round(totalRevenue / paidInvs.length) : 0;
+        const compRate     = allJobs.length > 0 ? Math.round((completed / allJobs.length) * 100) : 0;
+
+        return res.status(200).json({
+          revenue: { total: totalRevenue, parts: partsTotal, labour: labourTotal, discounts, outstanding, invoiceCount: invoices.length },
+          jobs:    { total: allJobs.length, completed, completionRate: compRate, avgJobRevenue: avgJobRev },
+        });
+      }
+
+      // ── type=revenue-trend: daily & monthly breakdown ─────────────────────
+      if (type === 'revenue-trend') {
+        const invoices = await invoicesCol.find({ ...bFilter, ...dateFilter('invoiceDate') }).toArray();
+        const byDay = {};
+        const byMonth = {};
+        invoices.forEach(inv => {
+          const day = inv.invoiceDate || '';
+          const mo  = day.slice(0, 7); // YYYY-MM
+          if (!day) return;
+
+          if (!byDay[day])  byDay[day]  = { date: day,  revenue: 0, parts: 0, labour: 0, discounts: 0, count: 0 };
+          if (!byMonth[mo]) byMonth[mo] = { month: mo,  revenue: 0, parts: 0, labour: 0, discounts: 0, count: 0 };
+
+          const rev = inv.paymentStatus === 'Paid' ? (inv.total || 0) : 0;
+          const p   = inv.partsTotal   || 0;
+          const l   = inv.labourCharge || 0;
+          const d   = inv.discountAmt  || 0;
+
+          byDay[day].revenue   += rev; byDay[day].parts   += p; byDay[day].labour   += l; byDay[day].discounts += d; byDay[day].count++;
+          byMonth[mo].revenue  += rev; byMonth[mo].parts  += p; byMonth[mo].labour  += l; byMonth[mo].discounts+= d; byMonth[mo].count++;
+        });
+
+        return res.status(200).json({
+          daily:   Object.values(byDay).sort((a,b)  => a.date.localeCompare(b.date)),
+          monthly: Object.values(byMonth).sort((a,b) => a.month.localeCompare(b.month)),
+        });
+      }
+
+      // ── type=jobs-stats: services + technicians + daily ───────────────────
+      if (type === 'jobs-stats') {
+        const jobs = await jobsCol.aggregate([
+          { $match: { ...bFilter, ...dateFilter('date') } },
+          { $lookup: { from: 'job_timers', localField: '_id', foreignField: 'jobId', as: 'timerArr' } },
+        ]).toArray();
+
+        const serviceMap = {};
+        const techMap    = {};
+        const dailyMap   = {};
+
+        for (const job of jobs) {
+          const timer = job.timerArr?.[0] || null;
+          const svc   = job.service || 'Other';
+          const day   = job.date    || '';
+          const done  = job.status === 'done';
+
+          // ── service breakdown
+          if (!serviceMap[svc]) serviceMap[svc] = { service: svc, total: 0, completed: 0, totalWorkMins: 0, allocatedMins: 0 };
+          serviceMap[svc].total++;
+          serviceMap[svc].allocatedMins += job.allocatedMins || 0;
+          if (done) {
+            serviceMap[svc].completed++;
+            serviceMap[svc].totalWorkMins += timer ? Math.round((timer.activeWorkSecs || 0) / 60) : 0;
+          }
+
+          // ── technician breakdown
+          if (job.staffId) {
+            const sid = job.staffId.toString();
+            if (!techMap[sid]) techMap[sid] = { staffId: sid, name: job.staffName || 'Unknown', total: 0, completed: 0, totalWorkMins: 0, overtimeMins: 0, pauseCount: 0 };
+            techMap[sid].total++;
+            if (done && timer) {
+              techMap[sid].completed++;
+              techMap[sid].totalWorkMins += Math.round((timer.activeWorkSecs || 0) / 60);
+              techMap[sid].overtimeMins  += Math.round((timer.overtimeSecs   || 0) / 60);
+              techMap[sid].pauseCount    += (timer.pauseLogs || []).length;
+            }
+          }
+
+          // ── daily breakdown
+          if (day) {
+            if (!dailyMap[day]) dailyMap[day] = { date: day, total: 0, completed: 0, inProgress: 0, paused: 0 };
+            dailyMap[day].total++;
+            if (job.status === 'done')        dailyMap[day].completed++;
+            if (job.status === 'in_progress') dailyMap[day].inProgress++;
+            if (job.status === 'paused')      dailyMap[day].paused++;
+          }
+        }
+
+        const services = Object.values(serviceMap).map(s => ({
+          ...s,
+          avgMins:      s.completed > 0 ? Math.round(s.totalWorkMins / s.completed) : 0,
+          efficiencyPct:s.allocatedMins > 0 && s.totalWorkMins > 0 ? Math.round((s.allocatedMins / s.totalWorkMins) * 100) : null,
+        })).sort((a,b) => b.total - a.total);
+
+        const technicians = Object.values(techMap).map(t => ({
+          ...t,
+          avgJobMins:   t.completed > 0 ? Math.round(t.totalWorkMins / t.completed) : 0,
+          completionPct:t.total > 0 ? Math.round((t.completed / t.total) * 100) : 0,
+        })).sort((a,b) => b.completed - a.completed);
+
+        const daily = Object.values(dailyMap).sort((a,b) => a.date.localeCompare(b.date));
+
+        return res.status(200).json({ services, technicians, daily });
+      }
+
+      // ── type=inventory ────────────────────────────────────────────────────
+      if (type === 'inventory') {
+        const items = await inventoryCol.find(branch && branch !== 'All' ? { branch } : {}).toArray();
+
+        let totalValue = 0, lowStock = 0, outOfStock = 0;
+        const catMap = {};
+        const topItems = [];
+
+        items.forEach(item => {
+          const qty   = Number(item.quantity) || 0;
+          const price = Number(item.unitPrice || item.price || item.cost || 0);
+          const value = qty * price;
+          totalValue += value;
+          if (qty === 0) outOfStock++;
+          else if (qty < (item.minStock || 5)) lowStock++;
+
+          const cat = item.category || 'Uncategorised';
+          if (!catMap[cat]) catMap[cat] = { category: cat, items: 0, value: 0 };
+          catMap[cat].items++;
+          catMap[cat].value += value;
+
+          topItems.push({
+            name:     item.name || item.itemName || 'Unknown',
+            category: cat,
+            quantity: qty,
+            unitPrice:price,
+            value,
+            status:   qty === 0 ? 'Out of Stock' : qty < (item.minStock || 5) ? 'Low Stock' : 'In Stock',
+          });
+        });
+
+        topItems.sort((a,b) => b.value - a.value);
+
+        return res.status(200).json({
+          totalItems: items.length,
+          totalValue,
+          lowStock,
+          outOfStock,
+          categories: Object.values(catMap).sort((a,b) => b.value - a.value),
+          topItems:   topItems.slice(0, 15),
+        });
+      }
+
+      // ── type=service-prices ───────────────────────────────────────────────
+      if (type === 'service-prices') {
+        const prices = await pricesCol.find({}).toArray();
+        return res.status(200).json(prices.map(p => ({ name: p.name, code: p.code, price: p.price, duration: p.duration })));
+      }
+
+      return res.status(400).json({ error: 'Unknown report type. Use: overview | revenue-trend | jobs-stats | inventory | service-prices' });
+    }
+
     // ── REPORT ───────────────────────────────────────────────────────────────
     if (resource === 'report') {
       if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
@@ -440,6 +743,16 @@ module.exports = async function handler(req, res) {
           await jobsCol.updateOne({ _id: jobId }, { $inc: { allocatedMins: extraMins }, $set: { updatedAt: now } });
         } else if (action === 'assign_bay') {
           await jobsCol.updateOne({ _id: jobId }, { $set: { bayNumber: bayNumber ?? null, updatedAt: now } });
+          // Keep staff_day_status in sync so Staff Management bay map reflects this assignment
+          const assignedJob = await jobsCol.findOne({ _id: jobId });
+          if (assignedJob?.staffId && assignedJob?.branch && assignedJob?.date) {
+            const statusCol = db.collection('staff_day_status');
+            await statusCol.updateOne(
+              { staffId: assignedJob.staffId, branch: assignedJob.branch, date: assignedJob.date },
+              { $set: { bayNumber: bayNumber ?? null } },
+              { upsert: true },
+            );
+          }
         } else if (action === 'unassign') {
           await jobsCol.updateOne({ _id: jobId }, { $set: { staffId: null, bayNumber: null, status: 'unassigned', updatedAt: now } });
         } else if (action === 'chain_next') {
