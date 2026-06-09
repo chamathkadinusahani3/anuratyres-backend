@@ -13,7 +13,9 @@
       },
       "continue": true
     },
-{ "src": "/api/inventory/(.*)",              "dest": "/api/inventory.js" },
+{ "src": "/api/products/(.*)",               "dest": "/api/products.js" },
+    { "src": "/api/products",                    "dest": "/api/products.js" },
+    { "src": "/api/inventory/(.*)",              "dest": "/api/inventory.js" },
     { "src": "/api/inventory",                   "dest": "/api/inventory.js" },
     { "src": "/api/bookings/cron/late-alerts",   "dest": "/api/bookings.js" },
     { "src": "/api/bookings/stats/summary",      "dest": "/api/bookings.js" },

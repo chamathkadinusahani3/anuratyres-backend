@@ -48,6 +48,15 @@ const inventoryItemSchema = new mongoose.Schema({
 
   lastImportJobId: { type: mongoose.Schema.Types.ObjectId, default: null },
 
+  images: [{
+    url:      { type: String, required: true },
+    publicId: { type: String, required: true },
+    featured: { type: Boolean, default: false },
+    sortOrder:{ type: Number,  default: 0 },
+    alt:      { type: String,  default: '' },
+    uploadedAt: { type: Date, default: Date.now },
+  }],
+
   createdBy: {
     username: String,
     role: String,

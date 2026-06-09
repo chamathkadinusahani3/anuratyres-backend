@@ -45,6 +45,7 @@ import {
   readJsonBody,
   performedByOf,
 } from '../lib/inventoryApiUtils.js';
+import { cloudinaryEnabled, signUpload, deleteFromCloudinary } from '../lib/cloudinaryHelper.js';
 
 const PREVIEW_ROWS = 50;
 
@@ -67,6 +68,17 @@ function serializeItem(doc) {
     status: item.status,
     stockStatus: item.quantity <= 0 ? 'Out of Stock' : item.quantity <= item.minimumStock ? 'Low Stock' : 'In Stock',
     source: item.source,
+    images: (item.images || [])
+      .sort((a, b) => a.sortOrder - b.sortOrder)
+      .map((img) => ({
+        id: img._id?.toString() || img.id,
+        url: img.url,
+        publicId: img.publicId,
+        featured: img.featured,
+        sortOrder: img.sortOrder,
+        alt: img.alt || '',
+        uploadedAt: img.uploadedAt,
+      })),
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
   };
@@ -713,9 +725,149 @@ async function dispatchImportJob(req, res, ctx, jobId) {
   return res.status(405).json({ success: false, message: 'Method not allowed' });
 }
 
+// ── Product images ───────────────────────────────────────────────────────────
+function handleImagesGet(res, item) {
+  const images = (item.images || [])
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((img) => ({
+      id: img._id?.toString() || img.id,
+      url: img.url,
+      publicId: img.publicId,
+      featured: img.featured,
+      sortOrder: img.sortOrder,
+      alt: img.alt || '',
+      uploadedAt: img.uploadedAt,
+    }));
+  return res.status(200).json({ success: true, images });
+}
+
+function handleImageSign(req, res, { user }) {
+  requireInventoryWrite(user);
+  if (!cloudinaryEnabled()) {
+    return res.status(503).json({
+      success: false,
+      notConfigured: true,
+      message: 'Cloudinary is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET in your Vercel environment variables.',
+    });
+  }
+  return res.status(200).json({ success: true, ...signUpload() });
+}
+
+async function handleImageSave(req, res, { user }, item) {
+  requireInventoryWrite(user);
+  const { url, publicId, alt = '' } = await readJsonBody(req);
+  if (!url || !publicId) {
+    return res.status(400).json({ success: false, message: 'url and publicId are required' });
+  }
+
+  const isFirst = (item.images || []).length === 0;
+  item.images = item.images || [];
+  item.images.push({
+    url,
+    publicId,
+    featured: isFirst,
+    sortOrder: item.images.length,
+    alt: (alt || '').toString().slice(0, 200),
+    uploadedAt: new Date(),
+  });
+  await item.save();
+
+  const saved = item.images[item.images.length - 1];
+  return res.status(201).json({
+    success: true,
+    image: {
+      id: saved._id.toString(),
+      url: saved.url,
+      publicId: saved.publicId,
+      featured: saved.featured,
+      sortOrder: saved.sortOrder,
+      alt: saved.alt,
+      uploadedAt: saved.uploadedAt,
+    },
+  });
+}
+
+async function handleImageDelete(req, res, { user }, item, imageId) {
+  requireInventoryWrite(user);
+  if (!mongoose.isValidObjectId(imageId)) {
+    return res.status(400).json({ success: false, message: 'Invalid image id' });
+  }
+
+  const idx = (item.images || []).findIndex((img) => img._id.toString() === imageId);
+  if (idx === -1) return res.status(404).json({ success: false, message: 'Image not found' });
+
+  const [removed] = item.images.splice(idx, 1);
+  const wasFeatured = removed.featured;
+
+  // Re-number sortOrder and set a new featured if needed
+  item.images.forEach((img, i) => { img.sortOrder = i; });
+  if (wasFeatured && item.images.length > 0) item.images[0].featured = true;
+
+  await item.save();
+  deleteFromCloudinary(removed.publicId).catch(() => {});
+
+  return res.status(200).json({ success: true });
+}
+
+async function handleImageFeatured(req, res, { user }, item, imageId) {
+  requireInventoryWrite(user);
+  if (!mongoose.isValidObjectId(imageId)) {
+    return res.status(400).json({ success: false, message: 'Invalid image id' });
+  }
+
+  let found = false;
+  (item.images || []).forEach((img) => {
+    img.featured = img._id.toString() === imageId;
+    if (img.featured) found = true;
+  });
+  if (!found) return res.status(404).json({ success: false, message: 'Image not found' });
+
+  await item.save();
+  return res.status(200).json({ success: true });
+}
+
+async function handleImageReorder(req, res, { user }, item) {
+  requireInventoryWrite(user);
+  const { order } = await readJsonBody(req); // [{id, sortOrder}]
+  if (!Array.isArray(order)) {
+    return res.status(400).json({ success: false, message: 'order must be an array of {id, sortOrder}' });
+  }
+
+  const map = new Map(order.map((o) => [o.id, Number(o.sortOrder)]));
+  (item.images || []).forEach((img) => {
+    const s = map.get(img._id.toString());
+    if (s !== undefined) img.sortOrder = s;
+  });
+  await item.save();
+  return res.status(200).json({ success: true });
+}
+
+function dispatchImages(req, res, ctx, item, third, fourth) {
+  if (!third) {
+    if (req.method === 'GET') return handleImagesGet(res, item);
+    if (req.method === 'POST') return handleImageSave(req, res, ctx, item);
+    return res.status(405).json({ success: false, message: 'Method not allowed' });
+  }
+  if (third === 'sign') return handleImageSign(req, res, ctx);
+  if (third === 'reorder') {
+    if (req.method === 'PATCH' || req.method === 'POST') return handleImageReorder(req, res, ctx, item);
+    return res.status(405).json({ success: false, message: 'Method not allowed' });
+  }
+  // third is an imageId
+  if (!fourth) {
+    if (req.method === 'DELETE') return handleImageDelete(req, res, ctx, item, third);
+    return res.status(405).json({ success: false, message: 'Method not allowed' });
+  }
+  if (fourth === 'featured') {
+    if (req.method === 'PATCH' || req.method === 'POST') return handleImageFeatured(req, res, ctx, item, third);
+    return res.status(405).json({ success: false, message: 'Method not allowed' });
+  }
+  return res.status(404).json({ success: false, message: 'Unknown image action' });
+}
+
 // ── Main dispatch ────────────────────────────────────────────────────────────
 export default withInventoryHandler(async (req, res, ctx) => {
-  const [first, second] = pathSegments(req);
+  const [first, second, third, fourth] = pathSegments(req);
 
   if (!first) {
     if (req.method === 'GET') return handleList(req, res, ctx);
@@ -736,9 +888,10 @@ export default withInventoryHandler(async (req, res, ctx) => {
     return dispatchImportJob(req, res, ctx, second);
   }
 
-  // Anything else is /api/inventory/:id (+ optional /restock).
+  // Anything else is /api/inventory/:id (+ optional sub-routes).
   const item = await loadItem(first);
   if (second === 'restock' && req.method === 'POST') return handleRestock(req, res, { ...ctx, item });
+  if (second === 'images') return dispatchImages(req, res, ctx, item, third, fourth);
   if (second) return res.status(404).json({ success: false, message: 'Unknown action' });
 
   if (req.method === 'GET') return handleGetItem(req, res, item);
