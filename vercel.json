@@ -35,7 +35,11 @@
     { "src": "/api/invoices/([a-f0-9]{24})/payment",             "dest": "/api/invoices.js" },
     { "src": "/api/invoices/([a-f0-9]{24})/status",              "dest": "/api/invoices.js" },
     { "src": "/api/invoices/([a-f0-9]{24})",                     "dest": "/api/invoices.js" },
-    { "src": "/api/invoices",                                     "dest": "/api/invoices.js" }
+    { "src": "/api/invoices",                                     "dest": "/api/invoices.js" },
+    { "src": "/api/crm/(.*)",                                     "dest": "/api/crm.js" },
+    { "src": "/api/crm",                                          "dest": "/api/crm.js" },
+    { "src": "/api/settings/(.*)",                                "dest": "/api/settings.js" },
+    { "src": "/api/settings",                                     "dest": "/api/settings.js" }
   ],
   "crons": []
 }

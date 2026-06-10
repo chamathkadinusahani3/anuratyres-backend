@@ -58,7 +58,7 @@ async function getMongoDb() {
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS, POST');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 }
 
@@ -66,6 +66,25 @@ function setCors(res) {
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+
+  // ── PATCH /api/customers?uid=X  → update CRM supplement in crm_customers ──
+  if (req.method === 'PATCH') {
+    const { uid } = req.query;
+    if (!uid) return res.status(400).json({ success: false, message: 'uid required' });
+    try {
+      const db = await getMongoDb();
+      const { _id, id, createdAt, ...body } = req.body;
+      await db.collection('crm_customers').updateOne(
+        { uid },
+        { $set: { ...body, updatedAt: new Date().toISOString() }, $setOnInsert: { uid, createdAt: new Date().toISOString() } },
+        { upsert: true },
+      );
+      return res.status(200).json({ success: true });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
 
   try {
@@ -80,8 +99,16 @@ module.exports = async function handler(req, res) {
       pageToken = result.pageToken;
     } while (pageToken);
 
-    // 2. Fetch MongoDB bookings grouped by firebaseUid
+    // 2. Fetch MongoDB bookings grouped by firebaseUid + CRM supplement data
     const db = await getMongoDb();
+
+    // Load CRM supplement data (tags, notes, tier, creditLimit, etc.)
+    const crmSupplements = await db.collection('crm_customers').find({}).toArray();
+    const crmByUid = {};
+    for (const s of crmSupplements) {
+      if (s.uid) crmByUid[s.uid] = s;
+    }
+
     const mongoBookings = await db.collection('bookings').find({
       firebaseUid: { $exists: true, $ne: null },
     }).toArray();
@@ -121,6 +148,8 @@ module.exports = async function handler(req, res) {
           const bookings     = bookingsByUid[uid] || [];
           const orderRevenue = orders.reduce((s, o) => s + (o.total || 0), 0);
 
+          const crm = crmByUid[uid] || {};
+
           return {
             uid,
             name:          user.displayName || '',
@@ -132,6 +161,18 @@ module.exports = async function handler(req, res) {
             createdAt:     user.metadata.creationTime,
             lastLogin:     user.metadata.lastSignInTime,
             disabled:      user.disabled,
+            // CRM supplement fields (from crm_customers collection)
+            tags:             crm.tags             ?? [],
+            notes:            crm.notes            ?? '',
+            tier:             crm.tier             ?? 'Bronze',
+            creditLimit:      crm.creditLimit      ?? 0,
+            preferredContact: crm.preferredContact ?? 'Call',
+            nic:              crm.nic              ?? '',
+            dob:              crm.dob              ?? '',
+            pointsBalance:    crm.pointsBalance    ?? 0,
+            csat:             crm.csat             ?? 0,
+            noShowCount:      crm.noShowCount      ?? 0,
+            referredBy:       crm.referredBy       ?? null,
             vehicles, appointments, orders, activity, bookings,
             stats: {
               vehicleCount:     vehicles.length,
@@ -157,6 +198,40 @@ module.exports = async function handler(req, res) {
         }
       })
     );
+
+    // Include walk-in customers stored in crm_customers (no Firebase account)
+    const walkIns = crmSupplements.filter(s => s.walkIn === true);
+    for (const w of walkIns) {
+      customers.push({
+        uid:             w.uid,
+        name:            w.name            ?? '',
+        email:           w.email           ?? '',
+        phone:           w.phone           ?? '',
+        photoURL:        '',
+        emailVerified:   false,
+        provider:        'walk-in',
+        createdAt:       w.createdAt,
+        lastLogin:       null,
+        disabled:        false,
+        tags:            w.tags            ?? [],
+        notes:           w.notes           ?? '',
+        tier:            w.tier            ?? 'Bronze',
+        creditLimit:     w.creditLimit     ?? 0,
+        preferredContact:w.preferredContact ?? 'Call',
+        nic:             w.nic             ?? '',
+        dob:             w.dob             ?? '',
+        pointsBalance:   w.pointsBalance   ?? 0,
+        csat:            0,
+        noShowCount:     0,
+        referredBy:      null,
+        vehicles:        w.vehicles        ?? [],
+        appointments:    [],
+        orders:          [],
+        activity:        [],
+        bookings:        [],
+        stats: { vehicleCount: 0, appointmentCount: 0, orderCount: 0, bookingCount: 0, totalRevenue: 0, lastActivity: null },
+      });
+    }
 
     customers.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 

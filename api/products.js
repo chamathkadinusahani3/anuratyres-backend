@@ -112,9 +112,10 @@ async function handleList(req, res) {
 // ── GET /api/products/meta ───────────────────────────────────────────────────
 async function handleMeta(req, res) {
   const base = { status: 'active' };
-  const [brands, categories, priceAgg, countAgg] = await Promise.all([
+  const [brands, categories, tyreSizes, priceAgg, countAgg] = await Promise.all([
     InventoryItem.distinct('brand', base),
     InventoryItem.distinct('category', base),
+    InventoryItem.distinct('tyre.size', { ...base, 'tyre.size': { $ne: '' } }),
     InventoryItem.aggregate([
       { $match: base },
       { $group: { _id: null, minPrice: { $min: '$sellPrice' }, maxPrice: { $max: '$sellPrice' } } },
@@ -138,6 +139,7 @@ async function handleMeta(req, res) {
     success: true,
     brands: brands.filter(Boolean).sort(),
     categories: categories.filter(Boolean).sort(),
+    tyreSizes: tyreSizes.filter(Boolean).sort(),
     priceRange: { min: pr.minPrice ?? 0, max: pr.maxPrice ?? 0 },
     stockCounts: { total: ct.total, inStock: ct.inStock, lowStock: ct.lowStock, outOfStock: ct.outOfStock },
   });
