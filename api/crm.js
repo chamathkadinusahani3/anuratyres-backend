@@ -14,8 +14,13 @@
 //              POST ?resource=fleet                → create fleet account
 //             PATCH ?resource=fleet&id=X          → update
 //
-// LOYALTY      GET  ?resource=loyalty[&customerId]
-//              POST ?resource=loyalty              → add/deduct points
+// LOYALTY      GET  ?resource=loyalty[&customerId]  → balances (with nearExpiryPoints) or customer history
+//              POST ?resource=loyalty              → add/deduct points (expiryDays, multiplier params)
+//
+// LOYALTY-CATALOGUE  GET  ?resource=loyalty-catalogue         → list reward items
+//                    POST ?resource=loyalty-catalogue         → create reward item
+//                   PATCH ?resource=loyalty-catalogue&id=X   → update
+//                  DELETE ?resource=loyalty-catalogue&id=X   → delete
 //
 // APPROVALS    GET  ?resource=approvals[&branch&status]
 //              POST ?resource=approvals            → create approval request
@@ -24,6 +29,16 @@
 // CUSTOMERS    GET  ?resource=customers[&uid]      → CRM supplement data
 //             PATCH ?resource=customers&uid=X      → update tags/notes/tier
 //              POST ?resource=customers            → create walk-in customer
+//            DELETE ?resource=customers&uid=X      → delete walk-in customer
+//
+// INSPECTIONS  GET  ?resource=inspections[&jobId=X|&id=X|&branch]
+//              POST ?resource=inspections            → create inspection for a job
+//             PATCH ?resource=inspections&id=X      → save damage/media/notes/approval
+//
+// EVENTS       GET  ?resource=events[&from&to]      → list manual calendar events
+//              POST ?resource=events               → create manual event
+//             PATCH ?resource=events&id=X         → update
+//            DELETE ?resource=events&id=X         → delete
 //
 // DASHBOARD    GET  ?resource=dashboard[&branch]   → aggregated KPIs
 
@@ -197,9 +212,19 @@ module.exports = async function handler(req, res) {
       if (req.method === 'GET') {
         const { customerId, limit = '50' } = req.query;
         if (!customerId) {
-          // Return all balances (for loyalty page overview)
+          // Return all balances with nearExpiryPoints (points expiring within 30 days)
           const balances = await balCol.find({}).sort({ points: -1 }).toArray();
-          return res.status(200).json(balances.map(d => ({ ...d, id: d._id.toString() })));
+          const thirtyDaysLater = new Date(Date.now() + 30 * 86400000).toISOString();
+          const expiring = await txCol.aggregate([
+            { $match: { type: 'earn', expiresAt: { $exists: true, $lte: thirtyDaysLater, $gt: now() } } },
+            { $group: { _id: '$customerId', expiringPoints: { $sum: '$points' } } },
+          ]).toArray();
+          const expiryMap = {};
+          expiring.forEach(e => { expiryMap[e._id] = e.expiringPoints; });
+          return res.status(200).json(balances.map(d => ({
+            ...d, id: d._id.toString(),
+            nearExpiryPoints: expiryMap[d.customerId] || 0,
+          })));
         }
         const [txs, bal] = await Promise.all([
           txCol.find({ customerId }).sort({ date: -1 }).limit(Math.min(Number(limit), 200)).toArray(),
@@ -214,14 +239,18 @@ module.exports = async function handler(req, res) {
       }
 
       if (req.method === 'POST') {
-        const { customerId, points, type = 'earn', reason = '', ref = '' } = req.body;
+        const { customerId, points, type = 'earn', reason = '', ref = '',
+                multiplier = 1, expiryDays = 365 } = req.body;
         if (!customerId || points == null) return res.status(400).json({ error: 'customerId and points required' });
-        const delta = type === 'redeem' ? -Math.abs(Number(points)) : Math.abs(Number(points));
+        const rawPoints = Math.abs(Number(points)) * Math.max(1, Number(multiplier));
+        const delta     = type === 'redeem' || type === 'expiry' ? -rawPoints : rawPoints;
+        const expiresAt = type === 'earn' ? new Date(Date.now() + Number(expiryDays) * 86400000).toISOString() : null;
 
-        await txCol.insertOne({ customerId, points: delta, type, reason, ref, date: now() });
+        await txCol.insertOne({ customerId, points: delta, type, reason, ref, date: now(), expiresAt,
+          multiplier: type === 'earn' ? Number(multiplier) : undefined });
 
         const bal = await balCol.findOne({ customerId });
-        const newPoints = (bal?.points ?? 0) + delta;
+        const newPoints = Math.max(0, (bal?.points ?? 0) + delta);
         const tier =
           newPoints >= 5000 ? 'Platinum' :
           newPoints >= 2000 ? 'Gold' :
@@ -233,6 +262,42 @@ module.exports = async function handler(req, res) {
           { upsert: true },
         );
         return res.status(200).json({ ok: true, newBalance: newPoints, tier });
+      }
+
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // ── LOYALTY REWARDS CATALOGUE ──────────────────────────────────────────────
+    if (resource === 'loyalty-catalogue') {
+      const col = db.collection('crm_loyalty_catalogue');
+
+      if (req.method === 'GET') {
+        const docs = await col.find({}).sort({ points: 1 }).toArray();
+        return res.status(200).json(docs.map(d => ({ ...d, id: d._id.toString() })));
+      }
+
+      if (req.method === 'POST') {
+        const { name, description = '', points, category = 'service', active = true } = req.body;
+        if (!name || !points) return res.status(400).json({ error: 'name and points required' });
+        const r = await col.insertOne({ name, description, points: Number(points), category, active, createdAt: now() });
+        return res.status(201).json({ id: r.insertedId.toString() });
+      }
+
+      if (req.method === 'PATCH') {
+        const { id } = req.query;
+        const oid = toOid(id);
+        if (!oid) return res.status(400).json({ error: 'valid id required' });
+        const { _id, createdAt, ...body } = req.body;
+        await col.updateOne({ _id: oid }, { $set: { ...body, updatedAt: now() } });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (req.method === 'DELETE') {
+        const { id } = req.query;
+        const oid = toOid(id);
+        if (!oid) return res.status(400).json({ error: 'valid id required' });
+        await col.deleteOne({ _id: oid });
+        return res.status(200).json({ ok: true });
       }
 
       return res.status(405).json({ error: 'Method not allowed' });
@@ -322,6 +387,132 @@ module.exports = async function handler(req, res) {
           { $set: { ...body, updatedAt: now() }, $setOnInsert: { uid, createdAt: now() } },
           { upsert: true },
         );
+        return res.status(200).json({ ok: true });
+      }
+
+      // Delete walk-in customer (only walk-in records stored in this collection)
+      if (req.method === 'DELETE') {
+        const { uid } = req.query;
+        if (!uid) return res.status(400).json({ error: 'uid required' });
+        const result = await col.deleteOne({ uid });
+        if (result.deletedCount === 0) return res.status(404).json({ error: 'Customer not found' });
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // ── DAMAGE INSPECTIONS ────────────────────────────────────────────────────
+    // Linked to job_assignments by jobId (string). Media stored as compressed
+    // base64 inside the document (images only; videos store metadata only).
+    if (resource === 'inspections') {
+      const col = db.collection('inspections');
+
+      if (req.method === 'GET') {
+        const { jobId, id, branch, limit = '100' } = req.query;
+
+        // Fetch single by MongoDB _id
+        if (id) {
+          const oid = toOid(id);
+          if (!oid) return res.status(400).json({ error: 'valid id required' });
+          const doc = await col.findOne({ _id: oid });
+          if (!doc) return res.status(404).json({ error: 'Not found' });
+          return res.status(200).json({ ...doc, id: doc._id.toString() });
+        }
+
+        // Fetch by jobId — return null if none exists (not 404)
+        if (jobId) {
+          const doc = await col.findOne({ jobId });
+          if (!doc) return res.status(200).json(null);
+          return res.status(200).json({ ...doc, id: doc._id.toString() });
+        }
+
+        // List with optional branch filter
+        const q = {};
+        if (branch && branch !== 'all') {
+          q['jobSummary.branch'] = { $regex: branch, $options: 'i' };
+        }
+        const docs = await col.find(q).sort({ updatedAt: -1 }).limit(Math.min(Number(limit), 200)).toArray();
+        return res.status(200).json(docs.map(d => ({ ...d, id: d._id.toString() })));
+      }
+
+      // Create new inspection (idempotent — returns existing if jobId already has one)
+      if (req.method === 'POST') {
+        const { jobId, jobSummary = {} } = req.body;
+        if (!jobId) return res.status(400).json({ error: 'jobId required' });
+
+        const existing = await col.findOne({ jobId });
+        if (existing) return res.status(200).json({ ...existing, id: existing._id.toString() });
+
+        const doc = {
+          jobId,
+          jobSummary,
+          damageReports:      [],
+          techNotes:          '',
+          quotationItems:     [{ id: Math.random().toString(36).slice(2, 10), item: '', qty: 1, unitPrice: 0, labourCost: 0 }],
+          approvalStatus:     'not_sent',
+          approvalTimestamps: {},
+          mediaFiles:         [],
+          timeline:           [],
+          auditTrail:         [],
+          createdAt: now(),
+          updatedAt: now(),
+        };
+        const r = await col.insertOne(doc);
+        return res.status(201).json({ ...doc, id: r.insertedId.toString() });
+      }
+
+      // Partial update — caller sends only the fields that changed
+      if (req.method === 'PATCH') {
+        const { id } = req.query;
+        const oid = toOid(id);
+        if (!oid) return res.status(400).json({ error: 'valid id required' });
+        const { _id, createdAt, jobId, ...body } = req.body;
+        await col.updateOne({ _id: oid }, { $set: { ...body, updatedAt: now() } });
+        return res.status(200).json({ ok: true });
+      }
+
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // ── MANUAL CALENDAR EVENTS ────────────────────────────────────────────────
+    if (resource === 'events') {
+      const col = db.collection('crm_events');
+
+      if (req.method === 'GET') {
+        const { from, to, limit = '500' } = req.query;
+        const q = {};
+        if (from || to) {
+          q.date = {};
+          if (from) q.date.$gte = from;
+          if (to)   q.date.$lte = to;
+        }
+        const docs = await col.find(q).sort({ date: 1, time: 1 }).limit(Math.min(Number(limit), 1000)).toArray();
+        return res.status(200).json(docs.map(d => ({ ...d, id: d._id.toString() })));
+      }
+
+      if (req.method === 'POST') {
+        const { title, date, time = '09:00', type = 'custom', notes = '', customerName = '', branch = '' } = req.body;
+        if (!title || !date) return res.status(400).json({ error: 'title and date required' });
+        const doc = { title, date, time, type, notes, customerName, branch, createdAt: now() };
+        const r   = await col.insertOne(doc);
+        return res.status(201).json({ ...doc, id: r.insertedId.toString() });
+      }
+
+      if (req.method === 'PATCH') {
+        const { id } = req.query;
+        const oid = toOid(id);
+        if (!oid) return res.status(400).json({ error: 'valid id required' });
+        const { _id, createdAt, ...body } = req.body;
+        await col.updateOne({ _id: oid }, { $set: { ...body, updatedAt: now() } });
+        return res.status(200).json({ ok: true });
+      }
+
+      if (req.method === 'DELETE') {
+        const { id } = req.query;
+        const oid = toOid(id);
+        if (!oid) return res.status(400).json({ error: 'valid id required' });
+        await col.deleteOne({ _id: oid });
         return res.status(200).json({ ok: true });
       }
 
