@@ -13,7 +13,7 @@ import InventoryItem from '../models/InventoryItem.js';
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
@@ -170,15 +170,52 @@ async function handleGetProduct(req, res, id) {
   });
 }
 
+// ── POST /api/products/order — place order & deduct inventory ────────────────
+async function handlePlaceOrder(req, res) {
+  const { items, ref, fulfilment, payment, total, userId } = req.body || {};
+  if (!Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ success: false, message: 'items required' });
+
+  const results = [];
+  for (const { productId, qty } of items) {
+    if (!productId || !qty || qty < 1) continue;
+    try {
+      const updated = await InventoryItem.findByIdAndUpdate(
+        productId,
+        { $inc: { quantity: -Math.abs(qty) } },
+        { new: true, runValidators: false },
+      );
+      if (updated) {
+        // Clamp to 0 if somehow went negative
+        if (updated.quantity < 0) {
+          await InventoryItem.findByIdAndUpdate(productId, { $set: { quantity: 0 } });
+          updated.quantity = 0;
+        }
+        results.push({ productId, deducted: qty, remaining: updated.quantity });
+      }
+    } catch (e) {
+      console.error('[order] deduct error', productId, e.message);
+    }
+  }
+
+  return res.status(200).json({ success: true, ref, results });
+}
+
 // ── Main handler ─────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
-  if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
 
   try {
     await connectToDatabase();
     const [first] = pathSegments(req);
+
+    if (req.method === 'POST') {
+      if (first === 'order') return handlePlaceOrder(req, res);
+      return res.status(405).json({ success: false, message: 'Method not allowed' });
+    }
+
+    if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
     if (!first) return handleList(req, res);
     if (first === 'meta') return handleMeta(req, res);
     if (first === 'featured') return handleFeatured(req, res);
