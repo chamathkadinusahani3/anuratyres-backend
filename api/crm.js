@@ -65,9 +65,27 @@ function toOid(id) {
 
 function now() { return new Date().toISOString(); }
 
+// Parse raw body manually to support large payloads (video base64 can be 5–15 MB)
+async function parseBody(req) {
+  if (req.body !== undefined) return req.body; // already parsed by Vercel for small bodies
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => {
+      try { resolve(raw ? JSON.parse(raw) : {}); }
+      catch { resolve({}); }
+    });
+    req.on('error', reject);
+  });
+}
+
 module.exports = async function handler(req, res) {
   setCors(res);
   if (req.method === 'OPTIONS') return res.status(200).end();
+
+  if (['POST', 'PATCH', 'PUT'].includes(req.method)) {
+    req.body = await parseBody(req);
+  }
 
   try {
     const db       = await getDb();
@@ -492,9 +510,10 @@ module.exports = async function handler(req, res) {
       }
 
       if (req.method === 'POST') {
-        const { title, date, time = '09:00', type = 'custom', notes = '', customerName = '', branch = '' } = req.body;
+        const { title, date } = req.body;
         if (!title || !date) return res.status(400).json({ error: 'title and date required' });
-        const doc = { title, date, time, type, notes, customerName, branch, createdAt: now() };
+        const { _id, id, ...rest } = req.body;
+        const doc = { time: '09:00', type: 'custom', notes: '', customerName: '', branch: '', ...rest, createdAt: now() };
         const r   = await col.insertOne(doc);
         return res.status(201).json({ ...doc, id: r.insertedId.toString() });
       }

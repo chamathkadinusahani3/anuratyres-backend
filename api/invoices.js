@@ -24,6 +24,35 @@ function generateInvoiceNumber() {
   return `INV-${yr}${mo}-${rnd}`;
 }
 
+// Award loyalty points: 1 point per Rs 1000 spent
+// Uses customer phone (stripped of spaces) as the loyalty account ID
+async function awardLoyaltyPoints(db, phone, customerName, points, invoiceNumber) {
+  if (!phone || points <= 0) return 0;
+  const customerId = phone.replace(/\s+/g, '');
+  const txCol      = db.collection('crm_loyalty_tx');
+  const balCol     = db.collection('crm_loyalty_balance');
+  const now        = new Date().toISOString();
+
+  await txCol.insertOne({
+    customerId, customerName, points, type: 'earn',
+    reason: `Invoice ${invoiceNumber}`, ref: invoiceNumber,
+    date: now, createdAt: now,
+  });
+
+  const bal       = await balCol.findOne({ customerId });
+  const newPoints = (bal?.points ?? 0) + points;
+  const tier      = newPoints >= 5000 ? 'Platinum'
+                  : newPoints >= 2000 ? 'Gold'
+                  : newPoints >= 500  ? 'Silver' : 'Bronze';
+
+  await balCol.updateOne(
+    { customerId },
+    { $set: { points: newPoints, tier, customerName, updatedAt: now }, $setOnInsert: { createdAt: now } },
+    { upsert: true },
+  );
+  return points;
+}
+
 const VALID_STATUSES  = ['Draft', 'Issued', 'Paid', 'Void'];
 const VALID_PAYMENTS  = ['Unpaid', 'Partial', 'Paid', 'Overdue'];
 
@@ -120,6 +149,14 @@ module.exports = async function handler(req, res) {
         : 'Partial';
       const status = payStatus === 'Paid' ? 'Paid' : doc.status === 'Draft' ? 'Issued' : doc.status;
 
+      // Award loyalty points when invoice transitions to Paid for the first time
+      let pointsEarned = 0;
+      const becomingPaid = payStatus === 'Paid' && doc.paymentStatus !== 'Paid' && !doc.loyaltyPointsAwarded;
+      if (becomingPaid) {
+        const pts = Math.floor((doc.total || 0) / 1000);
+        pointsEarned = await awardLoyaltyPoints(db, doc.customer?.phone, doc.customer?.name, pts, doc.invoiceNumber);
+      }
+
       await col.updateOne(
         { _id: new ObjectId(docId) },
         {
@@ -132,6 +169,7 @@ module.exports = async function handler(req, res) {
             paymentDate:   paymentDate   || doc.paymentDate  || new Date().toISOString().split('T')[0],
             status,
             updatedAt:     new Date().toISOString(),
+            ...(becomingPaid && pointsEarned > 0 ? { loyaltyPointsAwarded: pointsEarned } : {}),
           },
           $push: {
             paymentHistory: {
@@ -144,7 +182,7 @@ module.exports = async function handler(req, res) {
           },
         },
       );
-      return res.status(200).json({ ok: true, paymentStatus: payStatus, balance: Math.max(0, balance) });
+      return res.status(200).json({ ok: true, paymentStatus: payStatus, balance: Math.max(0, balance), pointsEarned });
     }
 
     // ── PATCH /:id/status ────────────────────────────────────────────────────
@@ -226,7 +264,18 @@ module.exports = async function handler(req, res) {
         updatedAt:      now,
       };
       const result = await col.insertOne(doc);
-      return res.status(201).json({ id: result.insertedId.toString(), invoiceNumber: doc.invoiceNumber });
+
+      // Award loyalty points if invoice is created as Paid
+      let pointsEarned = 0;
+      if (doc.paymentStatus === 'Paid') {
+        const pts = Math.floor((doc.total || 0) / 1000);
+        pointsEarned = await awardLoyaltyPoints(db, body.customer?.phone, body.customer?.name, pts, doc.invoiceNumber);
+        if (pointsEarned > 0) {
+          await col.updateOne({ _id: result.insertedId }, { $set: { loyaltyPointsAwarded: pointsEarned } });
+        }
+      }
+
+      return res.status(201).json({ id: result.insertedId.toString(), invoiceNumber: doc.invoiceNumber, pointsEarned });
     }
 
     return res.status(405).json({ error: 'Method not allowed' });

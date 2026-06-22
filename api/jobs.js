@@ -775,6 +775,39 @@ module.exports = async function handler(req, res) {
       return res.status(405).json({ error: 'Method not allowed' });
     }
 
+    // ── JOB COMMENTS ─────────────────────────────────────────────────────────
+    if (resource === 'comment') {
+      if (!id) return res.status(400).json({ error: 'id required' });
+      let oid;
+      try { oid = new ObjectId(id); } catch { return res.status(400).json({ error: 'Invalid id' }); }
+      if (req.method === 'POST') {
+        const { text, author } = req.body;
+        if (!text) return res.status(400).json({ error: 'text required' });
+        const comment = { id: new ObjectId().toString(), text, author: author || 'Unknown', createdAt: new Date().toISOString() };
+        await jobsCol.updateOne({ _id: oid }, { $push: { comments: comment } });
+        return res.status(201).json(comment);
+      }
+      return res.status(405).json({ error: 'Method not allowed' });
+    }
+
+    // ── GENERAL JOB PATCH (status / date / invoiced updates) ─────────────────
+    if (req.method === 'PATCH' && id && !resource) {
+      let oid;
+      try { oid = new ObjectId(id); } catch { return res.status(400).json({ error: 'Invalid id' }); }
+      const { status, date: newDate, invoiced, invoiceId } = req.body;
+      const updates = { updatedAt: new Date() };
+      if (status    !== undefined) updates.status    = status;
+      if (newDate   !== undefined) updates.date      = newDate;
+      if (invoiced  !== undefined) updates.invoiced  = invoiced;
+      if (invoiceId !== undefined) updates.invoiceId = invoiceId;
+      await jobsCol.updateOne({ _id: oid }, { $set: updates });
+      if (status) {
+        const updatedJob = await jobsCol.findOne({ _id: oid });
+        if (updatedJob) await syncJobStatusToBooking(db, updatedJob, status);
+      }
+      return res.status(200).json({ ok: true });
+    }
+
     // ── GET JOB LIST ─────────────────────────────────────────────────────────
     if (req.method === 'GET') {
       if (!branch || !date) return res.status(400).json({ error: 'branch and date required' });

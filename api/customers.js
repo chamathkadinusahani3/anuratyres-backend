@@ -87,6 +87,61 @@ module.exports = async function handler(req, res) {
 
   if (req.method !== 'GET') return res.status(405).json({ success: false, message: 'Method not allowed' });
 
+  // ── Fast lookup by phone or vehicle (no Firebase, used by booking autofill) ──
+  if (req.query.phone || req.query.vehicle) {
+    try {
+      const db      = await getMongoDb();
+      const phone   = (req.query.phone   || '').replace(/\s/g, '');
+      const vehicle = (req.query.vehicle || '').replace(/\s/g, '').toUpperCase();
+
+      const orClauses = [];
+      if (phone.length   >= 7) orClauses.push({ 'customer.phone':   { $regex: phone,   $options: 'i' } });
+      if (vehicle.length >= 4) orClauses.push({ 'customer.vehicleNo': vehicle });
+
+      if (orClauses.length > 0) {
+        const booking = await db.collection('bookings').findOne(
+          { $or: orClauses },
+          { sort: { createdAt: -1 } },
+        );
+        if (booking?.customer) {
+          return res.status(200).json({
+            success:  true,
+            customer: {
+              name:      booking.customer.name      || '',
+              phone:     booking.customer.phone     || '',
+              email:     booking.customer.email     || '',
+              vehicleNo: booking.customer.vehicleNo || '',
+              source:    'booking',
+            },
+          });
+        }
+
+        // Fall back to crm_customers
+        const crmOr = [];
+        if (phone.length   >= 7) crmOr.push({ phone:            { $regex: phone, $options: 'i' } });
+        if (vehicle.length >= 4) crmOr.push({ 'vehicles.plate': vehicle });
+        if (crmOr.length > 0) {
+          const crm = await db.collection('crm_customers').findOne({ $or: crmOr });
+          if (crm) {
+            return res.status(200).json({
+              success:  true,
+              customer: {
+                name:      crm.name                   || '',
+                phone:     crm.phone                  || '',
+                email:     crm.email                  || '',
+                vehicleNo: crm.vehicles?.[0]?.plate   || '',
+                source:    'crm',
+              },
+            });
+          }
+        }
+      }
+      return res.status(200).json({ success: true, customer: null });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
   try {
     initFirebase();
 
@@ -114,6 +169,7 @@ module.exports = async function handler(req, res) {
     }).toArray();
 
     const bookingsByUid = {};
+    const phoneByUid    = {};  // best phone from bookings for each Firebase UID
     for (const b of mongoBookings) {
       if (!b.firebaseUid) continue;
       if (!bookingsByUid[b.firebaseUid]) bookingsByUid[b.firebaseUid] = [];
@@ -127,6 +183,10 @@ module.exports = async function handler(req, res) {
         vehicleNo: b.vehicleNo,
         total:     b.total || 0,
       });
+      // Capture first non-empty phone found in bookings for this UID
+      if (!phoneByUid[b.firebaseUid] && b.customer?.phone) {
+        phoneByUid[b.firebaseUid] = b.customer.phone;
+      }
     }
 
     // 3. For each user fetch Firestore sub-collections
@@ -152,9 +212,9 @@ module.exports = async function handler(req, res) {
 
           return {
             uid,
-            name:          user.displayName || '',
+            name:          user.displayName || crm.name || '',
             email:         user.email || '',
-            phone:         user.phoneNumber || '',
+            phone:         user.phoneNumber || crm.phone || phoneByUid[uid] || '',
             photoURL:      user.photoURL || '',
             emailVerified: user.emailVerified,
             provider:      user.providerData?.[0]?.providerId || 'email',
@@ -184,9 +244,10 @@ module.exports = async function handler(req, res) {
             },
           };
         } catch (err) {
+          const fallbackCrm = crmByUid[user.uid] || {};
           return {
-            uid: user.uid, name: user.displayName || '', email: user.email || '',
-            phone: user.phoneNumber || '',
+            uid: user.uid, name: user.displayName || fallbackCrm.name || '', email: user.email || '',
+            phone: user.phoneNumber || fallbackCrm.phone || phoneByUid[user.uid] || '',
             provider: user.providerData?.[0]?.providerId || 'email',
             createdAt: user.metadata.creationTime,
             lastLogin: user.metadata.lastSignInTime,
@@ -231,6 +292,79 @@ module.exports = async function handler(req, res) {
         bookings:        [],
         stats: { vehicleCount: 0, appointmentCount: 0, orderCount: 0, bookingCount: 0, totalRevenue: 0, lastActivity: null },
       });
+    }
+
+    // ── Booking-only customers (manual bookings, no Firebase / CRM record) ──
+    const anonymousBookings = await db.collection('bookings').find({
+      $or: [{ firebaseUid: null }, { firebaseUid: { $exists: false } }],
+      'customer.phone': { $exists: true, $ne: '' },
+    }).toArray();
+
+    const firebasePhones = new Set(allUsers.map(u => (u.phoneNumber || '').replace(/\s/g, '')).filter(Boolean));
+    const crmPhones      = new Set(walkIns.map(w => (w.phone || '').replace(/\s/g, '')).filter(Boolean));
+
+    const bookingPhoneMap = {};
+    for (const b of anonymousBookings) {
+      const rawPhone = b.customer?.phone || '';
+      const phone    = rawPhone.replace(/\s/g, '');
+      if (!phone || firebasePhones.has(phone) || crmPhones.has(phone)) continue;
+
+      if (!bookingPhoneMap[phone]) {
+        bookingPhoneMap[phone] = {
+          uid:              `booking-${phone}`,
+          name:             b.customer?.name  || '',
+          email:            b.customer?.email || '',
+          phone:            rawPhone,
+          photoURL:         '',
+          emailVerified:    false,
+          provider:         'manual-booking',
+          createdAt:        b.createdAt || new Date().toISOString(),
+          lastLogin:        null,
+          disabled:         false,
+          tags:             [],
+          notes:            '',
+          tier:             'Bronze',
+          creditLimit:      0,
+          preferredContact: 'Call',
+          nic:              '',
+          dob:              '',
+          pointsBalance:    0,
+          csat:             0,
+          noShowCount:      0,
+          referredBy:       null,
+          vehicles:         [],
+          appointments:     [],
+          orders:           [],
+          activity:         [],
+          bookings:         [],
+          stats: { vehicleCount: 0, appointmentCount: 0, orderCount: 0, bookingCount: 0, totalRevenue: 0, lastActivity: null },
+        };
+      }
+
+      const entry = bookingPhoneMap[phone];
+      if (!entry.name && b.customer?.name) entry.name = b.customer.name;
+
+      const plate = b.customer?.vehicleNo;
+      if (plate && !entry.vehicles.some(v => v.plate === plate)) {
+        entry.vehicles.push({ id: String(entry.vehicles.length), plate, make: '', model: '', year: '', tyreSize: '', insuranceExpiry: '', revenueExpiry: '' });
+        entry.stats.vehicleCount++;
+      }
+
+      entry.stats.bookingCount++;
+      entry.bookings.push({
+        id:        b._id?.toString() || '',
+        date:      b.date,
+        branch:    typeof b.branch === 'object' ? (b.branch.name || b.branch.id || '') : (b.branch || ''),
+        services:  (b.services || []).map(s => (typeof s === 'object' ? s.name : s)).filter(Boolean),
+        status:    b.status,
+        timeSlot:  b.timeSlot,
+        vehicleNo: plate || '',
+        total:     0,
+      });
+    }
+
+    for (const entry of Object.values(bookingPhoneMap)) {
+      customers.push(entry);
     }
 
     customers.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
